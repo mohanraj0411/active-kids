@@ -122,6 +122,27 @@ Run the deterministic controller harness with:
 npm run test:motion
 ```
 
+## Phase D platformer prototype
+
+`/game` now offers both the original Motion Target and the 2D Platformer
+Prototype. The platformer consumes Phase C `MotionEvent`s through a
+framework-independent `GameInputController`; it adds auto-run, jump physics,
+crouch bounds, a timed attack hitbox, a star collectible, friendly spider, gap,
+finish, score, and restart. Original SVG placeholder geometry is used.
+
+Development builds open the platformer in camera-free DEV INPUT mode so the
+full course can be tested without pose detection. Touch controls are available
+on phones; web also supports A/ArrowRight, Space, F, and ArrowDown. Select
+CAMERA INPUT to use the real MotionController stream. See
+[`docs/PLATFORMER.md`](docs/PLATFORMER.md) for architecture, rules, controls,
+test coverage, and physical-device validation steps.
+
+Run deterministic platformer checks with:
+
+```bash
+npm run test:platformer
+```
+
 For the normalized pose contract, full-body visibility rules, confidence
 thresholds, smoothing, FPS definitions, and device-validation checklist, see
 [`docs/POSE_DETECTION.md`](docs/POSE_DETECTION.md).

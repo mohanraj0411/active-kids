@@ -21,6 +21,7 @@ import { GameEngine } from '../game/GameEngine';
 import type { GameState, GameStatus } from '../game/types';
 import type { GestureEvent } from '../motion/types';
 import { colors, radius, spacing } from '../theme';
+import { PlatformerScreen } from './PlatformerScreen';
 
 const DEBUG_GAME = __DEV__;
 
@@ -31,6 +32,38 @@ type GameScreenProps = {
 };
 
 export function GameScreen({ onHome }: GameScreenProps) {
+  const [mode, setMode] = useState<'motion-target' | 'platformer' | null>(null);
+
+  if (mode === 'motion-target') return <MotionTargetGameScreen onHome={onHome} />;
+  if (mode === 'platformer') return <PlatformerScreen onHome={onHome} />;
+
+  return (
+    <SafeAreaView style={styles.modeRoot}>
+      <StatusBar barStyle="dark-content" />
+      <View style={styles.modeCard}>
+        <Text style={styles.modeEyebrow}>ACTIVE KIDS</Text>
+        <Text style={styles.modeTitle}>Choose a game</Text>
+        <Text style={styles.modeDescription}>
+          Motion Target keeps the original gesture game. Platformer Prototype connects movement to an original 2D runner.
+        </Text>
+        <AppButton
+          title="MOTION TARGET"
+          accessibilityLabel="Play Motion Target"
+          onPress={() => setMode('motion-target')}
+        />
+        <AppButton
+          title="PLATFORMER PROTOTYPE"
+          accessibilityLabel="Play the platformer prototype"
+          variant="secondary"
+          onPress={() => setMode('platformer')}
+        />
+        <AppButton title="HOME" variant="light" onPress={onHome} />
+      </View>
+    </SafeAreaView>
+  );
+}
+
+function MotionTargetGameScreen({ onHome }: GameScreenProps) {
   const [gameEngine] = useState(() => new GameEngine());
   const [gameState, setGameState] = useState<GameState>(() => gameEngine.getState());
   const [pauseReason, setPauseReason] = useState<PauseReason>(null);
@@ -545,6 +578,42 @@ function getDetectorLabel(camera: CameraGameOverlayInfo): string {
 }
 
 const styles = StyleSheet.create({
+  modeRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xl,
+    backgroundColor: colors.background,
+  },
+  modeCard: {
+    width: '100%',
+    maxWidth: 460,
+    alignItems: 'center',
+    gap: spacing.md,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    backgroundColor: colors.white,
+  },
+  modeEyebrow: {
+    color: colors.primary,
+    fontSize: 13,
+    fontWeight: '900',
+    letterSpacing: 1.4,
+  },
+  modeTitle: {
+    color: colors.text,
+    fontSize: 28,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  modeDescription: {
+    marginBottom: spacing.sm,
+    color: colors.textSecondary,
+    fontSize: 15,
+    lineHeight: 22,
+    textAlign: 'center',
+  },
   gameOverlay: {
     ...StyleSheet.absoluteFill,
     justifyContent: 'space-between',

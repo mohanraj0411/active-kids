@@ -196,6 +196,7 @@ export class MotionController {
       this.motionResult = this.motionEngine.processPose(frame);
       this.overallInvalidSince ??= timestamp;
       if (timestamp - this.overallInvalidSince >= MOTION_CONTROLLER_CONFIG.invalidResetMs) {
+        this.releaseContinuousInputs(timestamp, confidence, events);
         this.resetRecognitionState();
       }
       this.refreshDiagnostics(timestamp, confidence, null, null, null, null);
@@ -254,6 +255,9 @@ export class MotionController {
       this.clearRunVelocityReference();
       this.clearJumpVelocityReference();
       if (timestamp - this.lowerBodyInvalidSince >= MOTION_CONTROLLER_CONFIG.invalidResetMs) {
+        if (this.running) {
+          events.push(makeEvent('RUN_STOP', timestamp, confidence));
+        }
         this.running = false;
         this.resetRunSequence();
         this.resetJumpState();
@@ -562,6 +566,9 @@ export class MotionController {
     if (!squat?.available) {
       this.crouchInvalidSince ??= timestamp;
       if (timestamp - this.crouchInvalidSince >= MOTION_CONTROLLER_CONFIG.invalidResetMs) {
+        if (this.crouching) {
+          events.push(makeEvent('CROUCH_END', timestamp, result.confidence));
+        }
         this.crouching = false;
         this.crouchCandidateSince = null;
         this.crouchReleaseSince = null;
@@ -717,6 +724,15 @@ export class MotionController {
     this.crouchInvalidSince = null;
     this.crouchCandidateSince = null;
     this.crouchReleaseSince = null;
+  }
+
+  private releaseContinuousInputs(
+    timestamp: number,
+    confidence: number,
+    events: MotionEvent[],
+  ): void {
+    if (this.running) events.push(makeEvent('RUN_STOP', timestamp, confidence));
+    if (this.crouching) events.push(makeEvent('CROUCH_END', timestamp, confidence));
   }
 
   private getArmPrevious(side: 'left' | 'right'): RelativeArmPoint | null {

@@ -30,6 +30,7 @@ try {
     ['fast arm motion emits once and waits for rearm', testArmSwingCooldown],
     ['standing → crouch → standing', testCrouchLifecycle],
     ['low-confidence pose cannot create action events', testLowConfidence],
+    ['tracking loss releases active run and crouch inputs', testTrackingLossReleasesInputs],
     ['run can coexist with swing and jump events', testCombinedMotions],
     ['body-scale changes preserve run recognition', testBodyScale],
     ['irregular frame times use measured deltas', testIrregularTiming],
@@ -157,6 +158,50 @@ function testLowConfidence() {
   }
   const lowLegEvents = controller.update(lowLegs);
   assert.equal(lowLegEvents.some((event) => event.type === 'RUN_START' || event.type === 'JUMP'), false);
+}
+
+function testTrackingLossReleasesInputs() {
+  const runningController = new MotionController();
+  let timestamp = 5_400;
+  for (let index = 0; index < 45; index += 1) {
+    timestamp += 100;
+    runningController.update(makePose(timestamp, { runTimeMs: index * 100 }));
+  }
+  assert.equal(runningController.state, 'RUN');
+
+  const runLossEvents = [];
+  for (let index = 0; index < 11; index += 1) {
+    timestamp += 100;
+    const lostPose = makePose(timestamp);
+    lostPose.detected = false;
+    lostPose.confidence = 0;
+    runLossEvents.push(...runningController.update(lostPose));
+  }
+  assert.equal(runLossEvents.filter((event) => event.type === 'RUN_STOP').length, 1);
+  assert.equal(runningController.state, 'IDLE');
+
+  const crouchingController = new MotionController();
+  timestamp += 100;
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    crouchingController.update(makePose(timestamp));
+  }
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    crouchingController.update(makePose(timestamp, { crouch: true }));
+  }
+  assert.equal(crouchingController.state, 'CROUCH');
+
+  const crouchLossEvents = [];
+  for (let index = 0; index < 11; index += 1) {
+    timestamp += 100;
+    const lostPose = makePose(timestamp);
+    lostPose.detected = false;
+    lostPose.confidence = 0;
+    crouchLossEvents.push(...crouchingController.update(lostPose));
+  }
+  assert.equal(crouchLossEvents.filter((event) => event.type === 'CROUCH_END').length, 1);
+  assert.equal(crouchingController.state, 'IDLE');
 }
 
 function testCombinedMotions() {

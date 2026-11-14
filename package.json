@@ -44,7 +44,8 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test:motion": "node ./scripts/test-motion-controller.cjs"
+    "test:motion": "node ./scripts/test-motion-controller.cjs",
+    "test:platformer": "node ./scripts/test-platformer.cjs"
   },
   "private": true
 }
