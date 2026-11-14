@@ -122,25 +122,39 @@ Run the deterministic controller harness with:
 npm run test:motion
 ```
 
-## Phase D platformer prototype
+## Local platformer
 
-`/game` now offers both the original Motion Target and the 2D Platformer
-Prototype. The platformer consumes Phase C `MotionEvent`s through a
-framework-independent `GameInputController`; it adds auto-run, jump physics,
-crouch bounds, a timed attack hitbox, a star collectible, friendly spider, gap,
-finish, score, and restart. Original SVG placeholder geometry is used.
+`PLAY` opens the platformer directly. The front camera, MediaPipe pose
+detection, Phase C `MotionController`, `GameInputController`, `GameController`,
+and renderer all run on the phone. The setup checks for a visible full body,
+then starts a fullscreen landscape level. Android's system screen mirroring can
+show the same display on a TV; no casting service is built into Active Kids.
 
-Development builds open the platformer in camera-free DEV INPUT mode so the
-full course can be tested without pose detection. Touch controls are available
-on phones; web also supports A/ArrowRight, Space, F, and ArrowDown. Select
-CAMERA INPUT to use the real MotionController stream. See
-[`docs/PLATFORMER.md`](docs/PLATFORMER.md) for architecture, rules, controls,
-test coverage, and physical-device validation steps.
+The platformer keeps the local camera-to-game pipeline and adds an original
+animated adventurer, fruit and star feedback, seven gap sections, friendly
+spiders, checkpoint retries, and a celebratory result. Camera setup includes
+full-body guidance, movement cues, and a short safety reminder. Development
+builds offer **DEV INPUT** and an opt-in **DEBUG** overlay. See
+[`docs/PLATFORMER.md`](docs/PLATFORMER.md) for the game rules and
+[`docs/MOBILE_GAME.md`](docs/MOBILE_GAME.md) for the phone-first flow,
+screen-mirroring setup, safety behavior, and device test procedure.
 
 Run deterministic platformer checks with:
 
 ```bash
 npm run test:platformer
+```
+
+## Experimental network code
+
+The old LAN protocol and relay remain isolated as experimental infrastructure
+in `src/network/` and `scripts/network-host.cjs`. They are not used by the app's
+normal routes or required for gameplay. The `ws` package is a development
+dependency for the loopback relay and its tests. Run the experimental protocol
+checks with:
+
+```bash
+npm run test:network
 ```
 
 For the normalized pose contract, full-body visibility rules, confidence
@@ -155,6 +169,7 @@ npx expo lint
 npx expo-doctor
 ```
 
-Physical testing is still required to verify pose accuracy, camera switching,
-front/back alignment, device FPS, and startup time. Do not use Expo Go for this
-phase; it cannot load `expo-mediapipe-pose`.
+Physical Android testing is still required for camera behavior during hidden
+preview, pose accuracy, landscape/fullscreen layout, screen mirroring, device
+FPS, and sustained stability. Do not use Expo Go for MediaPipe; use a rebuilt
+development build that includes the current native dependencies.

@@ -7,6 +7,8 @@ const path = require('node:path');
 const projectRoot = path.resolve(__dirname, '..');
 const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'active-kids-motion-'));
 let MotionController;
+let GameController;
+let GameInputController;
 
 try {
   const compiler = path.join(projectRoot, 'node_modules', 'typescript', 'bin', 'tsc');
@@ -21,9 +23,13 @@ try {
     '--strict',
     '--skipLibCheck',
     path.join(projectRoot, 'src', 'motion', 'MotionController.ts'),
+    path.join(projectRoot, 'src', 'game', 'platformer', 'GameController.ts'),
+    path.join(projectRoot, 'src', 'game', 'platformer', 'GameInputController.ts'),
   ], { cwd: projectRoot, stdio: 'inherit' });
 
   ({ MotionController } = require(path.join(outputDirectory, 'motion', 'MotionController.js')));
+  ({ GameController } = require(path.join(outputDirectory, 'game', 'platformer', 'GameController.js')));
+  ({ GameInputController } = require(path.join(outputDirectory, 'game', 'platformer', 'GameInputController.js')));
   const tests = [
     ['idle → run → continued run → stop', testRunLifecycle],
     ['jump is one shot until landing', testJumpLifecycle],
@@ -34,6 +40,7 @@ try {
     ['run can coexist with swing and jump events', testCombinedMotions],
     ['body-scale changes preserve run recognition', testBodyScale],
     ['irregular frame times use measured deltas', testIrregularTiming],
+    ['MotionController events drive all local platformer actions', testLocalGameplayIntegration],
   ];
 
   for (const [name, test] of tests) {
@@ -264,6 +271,83 @@ function testIrregularTiming() {
   }
   assert.equal(runStarted, true);
   assert.equal(controller.state, 'RUN');
+}
+
+function testLocalGameplayIntegration() {
+  const motion = new MotionController();
+  const game = new GameController({ viewportWidth: 800, stageHeight: 450 });
+  const input = new GameInputController(game);
+  const seenEvents = new Set();
+  let timestamp = 8_000;
+  const feedPose = (pose) => {
+    for (const event of motion.update(pose)) {
+      seenEvents.add(event.type);
+      input.handleMotionEvent(event);
+    }
+  };
+
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  for (let index = 0; index < 45; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp, { runTimeMs: index * 100 }));
+  }
+  assert.equal(game.currentStatus, 'PLAYING');
+  assert.equal(game.getState().player.running, true);
+
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  assert.equal(game.getState().player.running, false);
+
+  motion.reset();
+  for (let index = 0; index < 9; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  for (const lift of [0.24, 0.31, 0.34, 0.34]) {
+    timestamp += 100;
+    feedPose(makePose(timestamp, { jumpLiftScale: lift }));
+  }
+  assert.equal(game.getState().player.grounded, false);
+  assert.equal(game.getState().player.state, 'JUMPING');
+
+  motion.reset();
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  timestamp += 100;
+  feedPose(makePose(timestamp, { leftArmSwingScale: 0.48 }));
+  for (let index = 0; index < 10; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp, { leftArmSwingScale: 0.48 }));
+  }
+  assert.equal(game.getState().player.attacking, true);
+
+  for (let index = 0; index < 35; index += 1) game.update(0.05);
+  motion.reset();
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp, { crouch: true }));
+  }
+  assert.equal(game.getState().player.crouching, true);
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    feedPose(makePose(timestamp));
+  }
+  assert.equal(game.getState().player.crouching, false);
+
+  for (const event of ['RUN_START', 'RUN_STOP', 'JUMP', 'ARM_SWING', 'CROUCH_START', 'CROUCH_END']) {
+    assert.equal(seenEvents.has(event), true, `${event} should travel through the local pipeline`);
+  }
 }
 
 function makePose(timestamp, options = {}) {

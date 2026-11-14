@@ -91,6 +91,8 @@ export interface PoseDetectorCameraProps {
   cameraFacing: CameraFacing;
   isActive: boolean;
   sessionKey: number;
+  /** Hide the native preview surface while leaving inference mounted and active. */
+  previewVisible?: boolean;
   motionHighlights?: {
     leftArm: boolean;
     rightArm: boolean;

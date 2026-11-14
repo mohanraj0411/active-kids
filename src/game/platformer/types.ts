@@ -40,6 +40,7 @@ export interface CollectibleObject {
   y: number;
   radius: number;
   value: number;
+  kind?: 'STAR' | 'FRUIT';
   collected: boolean;
 }
 
@@ -70,7 +71,20 @@ export interface PlatformerLevel {
   worldWidth: number;
   groundY: number;
   startX: number;
+  checkpoints?: number[];
+  crouchGates?: { x: number; width: number }[];
   objects: PlatformerLevelObject[];
+}
+
+export type PlatformerFeedbackType = 'COLLECTIBLE' | 'ENEMY_HIT' | 'LANDING' | 'FINISH';
+
+export interface PlatformerFeedback {
+  id: number;
+  type: PlatformerFeedbackType;
+  x: number;
+  y: number;
+  label: string;
+  time: number;
 }
 
 export interface PlayerSnapshot {
@@ -86,6 +100,7 @@ export interface PlayerSnapshot {
   crouching: boolean;
   attacking: boolean;
   attackHitActive: boolean;
+  attackProgress: number;
   animationTime: number;
 }
 
@@ -93,10 +108,12 @@ export interface PlatformerSnapshot {
   status: PlatformerStatus;
   score: number;
   collectibles: number;
+  stars: number;
   elapsedSeconds: number;
   distance: number;
   cameraOffset: number;
   latestMotionEvent: MotionEvent | null;
+  feedback: PlatformerFeedback | null;
   player: PlayerSnapshot;
   level: PlatformerLevel;
 }

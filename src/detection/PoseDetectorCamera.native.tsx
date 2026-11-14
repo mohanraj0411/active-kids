@@ -62,6 +62,7 @@ export function PoseDetectorCamera({
   cameraFacing,
   isActive,
   sessionKey,
+  previewVisible = true,
   motionHighlights,
   onPose,
   onMetrics,
@@ -181,7 +182,9 @@ export function PoseDetectorCamera({
         };
 
         if (isMountedRef.current) {
-          setOverlaySnapshot({ sessionKey, cameraFacing, frame: nextOverlayFrame });
+          if (previewVisible) {
+            setOverlaySnapshot({ sessionKey, cameraFacing, frame: nextOverlayFrame });
+          }
           onPose(output.result);
         }
       } catch (error) {
@@ -191,7 +194,7 @@ export function PoseDetectorCamera({
         reportError('inferenceFailure');
       }
     },
-    [adapter, cameraFacing, onPose, reportError, sessionKey],
+    [adapter, cameraFacing, onPose, previewVisible, reportError, sessionKey],
   );
 
   const handleMetrics = useCallback(
@@ -257,7 +260,9 @@ export function PoseDetectorCamera({
       {canMountCamera && cameraMode && (
         <PoseCameraView
           key={sessionKey}
-          style={StyleSheet.absoluteFill}
+          // Keep a laid-out native view attached: Android binds ImageAnalysis separately
+          // from PreviewView drawing, and iOS delivers frames from AVCaptureVideoDataOutput.
+          style={[StyleSheet.absoluteFill, !previewVisible && styles.hiddenPreview]}
           isActive={isActive && !hasFailed}
           cameraFacing={cameraFacing}
           cameraLens={cameraMode.lens}
@@ -286,7 +291,7 @@ export function PoseDetectorCamera({
         />
       )}
 
-      {overlayFrame && stageSize.width > 0 && stageSize.height > 0 && (
+      {previewVisible && overlayFrame && stageSize.width > 0 && stageSize.height > 0 && (
         <View pointerEvents="none" style={styles.overlay}>
           <PoseSkeleton
             frame={overlayFrame}
@@ -534,5 +539,8 @@ const styles = StyleSheet.create({
   },
   overlay: {
     ...StyleSheet.absoluteFill,
+  },
+  hiddenPreview: {
+    opacity: 0,
   },
 });

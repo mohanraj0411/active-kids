@@ -1,4 +1,4 @@
-import { useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import {
   createContext,
   useCallback,
@@ -50,6 +50,8 @@ import { colors, radius, spacing } from '../theme';
 type CameraScreenProps = {
   onExit: () => void;
   gameMode?: boolean;
+  previewVisible?: boolean;
+  motionEnabled?: boolean;
   onGestureEvent?: (event: GestureEvent) => void;
   onMotionEvent?: (event: MotionEvent) => void;
   onSessionReady?: () => void;
@@ -68,7 +70,9 @@ export interface CameraGameOverlayInfo {
   motionState: ContinuousMotionState;
   motionDiagnostics: MotionControllerDiagnostics | null;
   lastMotionEvent: MotionEvent | null;
+  errorCode: PoseDetectorErrorCode | null;
   errorMessage: string | null;
+  resetMotionController: () => void;
   retryCamera: () => void;
   flipCamera: () => void;
 }
@@ -111,6 +115,8 @@ const EMPTY_BODY_VISIBILITY = assessBodyVisibility(null);
 export function CameraScreen({
   onExit,
   gameMode = false,
+  previewVisible = true,
+  motionEnabled = true,
   onGestureEvent,
   onMotionEvent,
   onSessionReady,
@@ -145,6 +151,7 @@ export function CameraScreen({
   if (motionControllerRef.current === null) {
     motionControllerRef.current = new MotionController();
   }
+  const motionEnabledRef = useRef(motionEnabled);
   const permissionRequestAttempted = useRef(false);
   const lastPoseUiUpdateAt = useRef(0);
   const lastPoseUiState = useRef<PoseDisplaySummary['state']>('looking');
@@ -152,17 +159,29 @@ export function CameraScreen({
   const cameraStartTime = useRef(0);
   const insets = useSafeAreaInsets();
 
+  const resetMotionController = useCallback(() => {
+    motionControllerRef.current?.reset();
+    setMotionResult(null);
+    setEventLog([]);
+    setLastGestureEvent(null);
+    setMotionDiagnostics(null);
+    setLastMotionEvent(null);
+    setMotionEventLog([]);
+    lastMotionUiUpdateAt.current = 0;
+  }, []);
+
+  const releaseMotionInputs = useCallback(() => {
+    const timestamp = Date.now();
+    onMotionEvent?.({ type: 'RUN_STOP', timestamp, confidence: 1, motion: 'RUN' });
+    onMotionEvent?.({ type: 'CROUCH_END', timestamp, confidence: 1, motion: 'CROUCH' });
+  }, [onMotionEvent]);
+
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
       const isActive = nextState === 'active';
       if (!isActive) {
-        motionControllerRef.current?.reset();
-        setMotionResult(null);
-        setEventLog([]);
-        setLastGestureEvent(null);
-        setMotionDiagnostics(null);
-        setLastMotionEvent(null);
-        setMotionEventLog([]);
+        releaseMotionInputs();
+        resetMotionController();
         lastPoseUiUpdateAt.current = 0;
         lastPoseUiState.current = 'looking';
         setPoseSummary(createEmptyPoseDisplaySummary());
@@ -172,9 +191,14 @@ export function CameraScreen({
     });
 
     return () => subscription.remove();
-  }, []);
+  }, [releaseMotionInputs, resetMotionController]);
 
   useEffect(() => () => motionControllerRef.current?.reset(), []);
+
+  useEffect(() => {
+    motionEnabledRef.current = motionEnabled;
+    if (!motionEnabled) motionControllerRef.current?.reset();
+  }, [motionEnabled]);
 
   useEffect(() => {
     if (permission?.granted) {
@@ -225,13 +249,8 @@ export function CameraScreen({
   }, [onSessionReady]);
 
   const handleCameraError = useCallback((error: PoseDetectorErrorCode) => {
-    motionControllerRef.current?.reset();
-    setMotionResult(null);
-    setEventLog([]);
-    setLastGestureEvent(null);
-    setMotionDiagnostics(null);
-    setLastMotionEvent(null);
-    setMotionEventLog([]);
+    releaseMotionInputs();
+    resetMotionController();
     setCameraStatus('unavailable');
     setDetectorError(error);
     lastPoseUiUpdateAt.current = 0;
@@ -248,12 +267,13 @@ export function CameraScreen({
         console.error('[CameraScreen] Pose camera failed.', error);
       }
     }
-  }, [onSessionError]);
+  }, [onSessionError, releaseMotionInputs, resetMotionController]);
 
   const handlePose = useCallback((pose: PoseResult) => {
     const controller = motionControllerRef.current;
-    const motionEvents = controller?.update(pose) ?? [];
-    const nextMotion = controller?.lastMotionResult;
+    const isMotionEnabled = motionEnabledRef.current;
+    const motionEvents = isMotionEnabled ? controller?.update(pose) ?? [] : [];
+    const nextMotion = isMotionEnabled ? controller?.lastMotionResult : null;
     if (motionEvents.length > 0) {
       for (const event of motionEvents) onMotionEvent?.(event);
       setLastMotionEvent(motionEvents[motionEvents.length - 1]);
@@ -332,7 +352,8 @@ export function CameraScreen({
 
   const beginCameraRestart = useCallback(() => {
     onSessionSuspended?.();
-    motionControllerRef.current?.reset();
+    releaseMotionInputs();
+    resetMotionController();
     cameraStartTime.current = Date.now();
     lastPoseUiUpdateAt.current = 0;
     lastPoseUiState.current = 'looking';
@@ -342,13 +363,10 @@ export function CameraScreen({
     setPoseSummary(createEmptyPoseDisplaySummary());
     setMetrics(null);
     setStartupTimeMs(null);
-    setMotionResult(null);
     setEventLog([]);
     setLastGestureEvent(null);
-    setMotionDiagnostics(null);
-    setLastMotionEvent(null);
     setMotionEventLog([]);
-  }, [onSessionSuspended]);
+  }, [onSessionSuspended, releaseMotionInputs, resetMotionController]);
 
   const retryCamera = useCallback(() => {
     beginCameraRestart();
@@ -363,7 +381,7 @@ export function CameraScreen({
   if (permissionState === 'checking') {
     return (
       <SafeAreaView style={styles.permissionSafeArea}>
-        <StatusBar barStyle="dark-content" />
+        <StatusBar hidden={gameMode} barStyle="dark-content" />
         <View style={styles.permissionContainer}>
           <Text style={styles.permissionEyebrow}>ACTIVE KIDS</Text>
           <Text style={styles.permissionTitle}>Checking camera permission</Text>
@@ -381,7 +399,7 @@ export function CameraScreen({
 
     return (
       <SafeAreaView style={styles.permissionSafeArea}>
-        <StatusBar barStyle="dark-content" />
+        <StatusBar hidden={gameMode} barStyle="dark-content" />
         <View style={styles.permissionContainer}>
           <Text style={styles.permissionEyebrow}>ACTIVE KIDS</Text>
           <Text style={styles.permissionTitle}>Camera access needed</Text>
@@ -438,7 +456,9 @@ export function CameraScreen({
     motionState: motionDiagnostics?.state ?? 'IDLE',
     motionDiagnostics,
     lastMotionEvent,
+    errorCode: detectorError,
     errorMessage,
+    resetMotionController,
     retryCamera,
     flipCamera,
   };
@@ -450,14 +470,19 @@ export function CameraScreen({
   return (
     <CameraGameSessionContext.Provider value={gameOverlayInfo}>
       <View style={styles.cameraContainer}>
-        <StatusBar barStyle="light-content" />
+        <StatusBar hidden={gameMode} barStyle="light-content" />
         {cameraStatus === 'unavailable' ? (
-          <View style={styles.cameraUnavailable} />
+          detectorError === 'nativeModuleUnavailable' && previewVisible && permission?.granted ? (
+            <CameraView style={StyleSheet.absoluteFill} facing={cameraFacing} />
+          ) : (
+            <View style={styles.cameraUnavailable} />
+          )
         ) : (
           <PoseDetectorCamera
             cameraFacing={cameraFacing}
             isActive={appIsActive}
             sessionKey={cameraAttempt}
+            previewVisible={previewVisible}
             motionHighlights={motionHighlights}
             onPose={handlePose}
             onMetrics={handleMetrics}

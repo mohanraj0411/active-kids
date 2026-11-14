@@ -37,9 +37,12 @@ try {
     ['attack defeats enemy only during hit window', testAttackHitWindow],
     ['enemy contact without active attack ends game', testEnemyCollision],
     ['collectible is removed and awards ten points', testCollectible],
+    ['fruit scores without increasing the star count', testFruitCollection],
     ['gap causes a fall and game over', testGap],
+    ['fall retry keeps score and restarts at the latest safe checkpoint', testCheckpointRetry],
     ['platform supports a falling player', testPlatform],
     ['finish completes level', testFinish],
+    ['default course can be completed with run, jump, and swing actions', testDefaultCourse],
     ['restart restores the initial game and entities', testRestart],
     ['Phase C motion events map to player actions', testMotionIntegration],
   ];
@@ -136,6 +139,7 @@ function testAttackHitWindow() {
   assert.equal(game.getState().level.objects.find((object) => object.type === 'ENEMY').defeated, true);
   assert.equal(game.getState().score, 25);
   assert.equal(game.getState().player.attackHitActive, true);
+  assert.equal(game.getState().feedback.type, 'ENEMY_HIT');
 }
 
 function testEnemyCollision() {
@@ -162,7 +166,23 @@ function testCollectible() {
   const state = game.getState();
   assert.equal(state.score, 10);
   assert.equal(state.collectibles, 1);
+  assert.equal(state.stars, 1);
   assert.equal(state.level.objects[0].collected, true);
+  assert.equal(state.feedback.label, '+10');
+}
+
+function testFruitCollection() {
+  const { game } = createGame({
+    objects: [
+      { type: 'COLLECTIBLE', kind: 'FRUIT', id: 'fruit', x: 64, y: 250, radius: 15, value: 10, collected: false },
+    ],
+  });
+  game.start();
+  game.update(0.05);
+  const state = game.getState();
+  assert.equal(state.collectibles, 1);
+  assert.equal(state.stars, 0);
+  assert.equal(state.score, 10);
 }
 
 function testGap() {
@@ -174,6 +194,35 @@ function testGap() {
     game.update(0.05);
   }
   assert.equal(game.currentStatus, 'GAME_OVER');
+}
+
+function testCheckpointRetry() {
+  const level = {
+    worldWidth: 800,
+    groundY: 300,
+    startX: 40,
+    checkpoints: [80],
+    objects: [
+      { type: 'COLLECTIBLE', id: 'star', x: 64, y: 250, radius: 15, value: 10, collected: false },
+      { type: 'GAP', id: 'gap', x: 120, width: 150 },
+    ],
+  };
+  const { game, input } = createGame({ level });
+  input.handleDeveloperInput('RUN_START');
+  for (let index = 0; index < 120 && game.currentStatus === 'PLAYING'; index += 1) {
+    game.update(0.05);
+  }
+  assert.equal(game.currentStatus, 'GAME_OVER');
+  assert.equal(game.getState().score, 10);
+
+  game.retryFromCheckpoint();
+  const retried = game.getState();
+  assert.equal(retried.status, 'READY');
+  assert.equal(retried.player.x, 80);
+  assert.equal(retried.score, 10);
+  assert.equal(retried.collectibles, 1);
+  assert.equal(retried.stars, 1);
+  assert.equal(retried.level.objects[0].collected, true);
 }
 
 function testPlatform() {
@@ -197,6 +246,46 @@ function testFinish() {
     game.update(0.05);
   }
   assert.equal(game.currentStatus, 'COMPLETE');
+}
+
+function testDefaultCourse() {
+  const game = new GameController({ viewportWidth: 400, stageHeight: 360 });
+  const input = new GameInputController(game);
+  const attackedEnemies = new Set();
+  input.handleDeveloperInput('RUN_START');
+
+  for (let index = 0; index < 8_000 && game.currentStatus === 'PLAYING'; index += 1) {
+    const state = game.getState();
+    const player = state.player;
+    const upcomingGap = state.level.objects.find((object) =>
+      object.type === 'GAP' && object.x + object.width > player.x + player.width / 2,
+    );
+    if (
+      upcomingGap?.type === 'GAP' &&
+      player.grounded &&
+      upcomingGap.x - player.x < 100 &&
+      upcomingGap.x + upcomingGap.width > player.x
+    ) {
+      input.handleDeveloperInput('JUMP');
+    }
+
+    const enemy = state.level.objects.find((object) =>
+      object.type === 'ENEMY' && !object.defeated && !attackedEnemies.has(object.id),
+    );
+    if (
+      enemy?.type === 'ENEMY' &&
+      enemy.x - (player.x + player.width) < 100 &&
+      enemy.x - (player.x + player.width) > 15
+    ) {
+      attackedEnemies.add(enemy.id);
+      input.handleDeveloperInput('ARM_SWING');
+    }
+    game.update(1 / 60);
+  }
+
+  assert.equal(game.currentStatus, 'COMPLETE');
+  assert.equal(attackedEnemies.size, 7);
+  assert.ok(game.getState().stars >= 1);
 }
 
 function testRestart() {
@@ -236,8 +325,8 @@ function testMotionIntegration() {
   assert.equal(game.getState().latestMotionEvent.type, 'CROUCH_END');
 }
 
-function createGame({ objects = [] } = {}) {
-  const level = {
+function createGame({ objects = [], level: suppliedLevel } = {}) {
+  const level = suppliedLevel ?? {
     worldWidth: 1_200,
     groundY: 300,
     startX: 40,

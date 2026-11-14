@@ -43,11 +43,24 @@ export function HomeScreen({ onStartGame }: HomeScreenProps) {
           <View style={styles.heroMark}>
             <Text style={styles.heroMarkText}>MOVE &amp; PLAY</Text>
           </View>
-          <Text style={styles.title}>Move your body. Control the game.</Text>
+          <Text style={styles.title}>Your body is the controller.</Text>
           <Text style={styles.subtitle}>
-            Get ready to move and play. On-device pose detection finds your
-            body in the live camera preview.
+            Run, jump, swing, and crouch to guide your explorer. Play on this
+            phone or mirror the screen to your TV.
           </Text>
+          <View style={styles.moveList} accessibilityLabel="Run, jump, swing, and crouch">
+            {[
+              ['RUN', '↗'],
+              ['JUMP', '↑'],
+              ['SWING', '↻'],
+              ['CROUCH', '↓'],
+            ].map(([label, icon]) => (
+              <View key={label} style={styles.moveChip}>
+                <Text style={styles.moveIcon} accessibilityElementsHidden>{icon}</Text>
+                <Text style={styles.moveLabel}>{label}</Text>
+              </View>
+            ))}
+          </View>
         </View>
 
         <View style={styles.footer}>
@@ -58,14 +71,14 @@ export function HomeScreen({ onStartGame }: HomeScreenProps) {
           />
 
           <AppButton
-            title="START GAME"
+            title="PLAY"
             accessibilityLabel="Start game"
             onPress={onStartGame}
             style={styles.startButton}
           />
 
           <Text style={styles.footerText}>
-            Camera permission is requested only when you start.
+            Stand several feet back so the camera can see your whole body.
           </Text>
         </View>
       </View>
@@ -146,6 +159,36 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     textAlign: 'center',
+  },
+  moveList: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.lg,
+  },
+  moveChip: {
+    minWidth: 74,
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  moveIcon: {
+    color: colors.primaryDark,
+    fontSize: 19,
+    lineHeight: 23,
+    fontWeight: '900',
+  },
+  moveLabel: {
+    color: colors.text,
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 0.5,
   },
   footer: {
     gap: spacing.md,

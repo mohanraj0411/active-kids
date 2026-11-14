@@ -32,13 +32,21 @@ export class GameInputController {
 
   /** Dev keys/buttons create the same event shape consumed from MotionController. */
   handleDeveloperInput(type: DevMotionEventType): void {
-    this.handleMotionEvent({
-      type,
-      timestamp: Date.now(),
-      confidence: 1,
-      motion: getMotionType(type),
-    });
+    this.handleMotionEvent(createMotionEvent(type));
   }
+}
+
+export function createMotionEvent(
+  type: MotionEventType,
+  timestamp = Date.now(),
+  confidence = 1,
+): MotionEvent {
+  return {
+    type,
+    timestamp,
+    confidence,
+    motion: getMotionType(type),
+  };
 }
 
 function getMotionType(type: MotionEventType): MotionType {

@@ -8,6 +8,8 @@ import type {
   GapObject,
   PlatformerLevel,
   PlatformerLevelObject,
+  PlatformerFeedback,
+  PlatformerFeedbackType,
   PlatformerSnapshot,
   PlatformerStatus,
   Rect,
@@ -30,8 +32,12 @@ export class GameController {
   private status: PlatformerStatus = 'READY';
   private score = 0;
   private collectibles = 0;
+  private stars = 0;
   private elapsedSeconds = 0;
   private latestMotionEvent: MotionEvent | null = null;
+  private checkpointX = 0;
+  private feedback: PlatformerFeedback | null = null;
+  private feedbackId = 0;
 
   constructor(options: GameControllerOptions) {
     this.viewportWidth = Math.max(240, options.viewportWidth);
@@ -39,6 +45,7 @@ export class GameController {
     this.scale = Math.max(0.65, this.viewportWidth / PLATFORMER_CONFIG.referenceWidth);
     this.customLevel = options.level;
     this.level = cloneLevel(options.level ?? createPlatformerLevel(this.viewportWidth, this.stageHeight));
+    this.checkpointX = this.level.startX;
     this.player = this.createPlayer();
   }
 
@@ -92,10 +99,20 @@ export class GameController {
 
     this.elapsedSeconds += deltaSeconds;
     const previousBounds = this.player.getBounds();
+    const wasGrounded = this.player.getState().grounded;
     this.player.update(deltaSeconds);
     this.resolveGround(previousBounds);
 
     const playerBounds = this.player.getBounds();
+    this.updateCheckpoint(playerBounds.x);
+    if (!wasGrounded && this.player.getState().grounded) {
+      this.setFeedback(
+        'LANDING',
+        playerBounds.x + playerBounds.width / 2,
+        playerBounds.y,
+        'NICE JUMP!',
+      );
+    }
     this.collectItems(playerBounds);
     this.resolveAttackAndEnemy(playerBounds);
     if (this.status !== 'PLAYING') return;
@@ -112,8 +129,20 @@ export class GameController {
     this.status = 'READY';
     this.score = 0;
     this.collectibles = 0;
+    this.stars = 0;
     this.elapsedSeconds = 0;
     this.latestMotionEvent = null;
+    this.checkpointX = this.level.startX;
+    this.feedback = null;
+  }
+
+  /** Restarts a fall from the latest safe marker and keeps earned progress. */
+  retryFromCheckpoint(): void {
+    if (this.status !== 'GAME_OVER') return;
+    this.player = this.createPlayer(this.checkpointX);
+    this.status = 'READY';
+    this.latestMotionEvent = null;
+    this.feedback = null;
   }
 
   getState(): PlatformerSnapshot {
@@ -122,6 +151,7 @@ export class GameController {
       status: this.status,
       score: this.score,
       collectibles: this.collectibles,
+      stars: this.stars,
       elapsedSeconds: this.elapsedSeconds,
       distance: Math.max(0, player.x - this.level.startX),
       cameraOffset: Math.max(
@@ -129,15 +159,16 @@ export class GameController {
         player.x - this.viewportWidth * PLATFORMER_CONFIG.cameraAnchorRatio,
       ),
       latestMotionEvent: this.latestMotionEvent,
+      feedback: this.feedback,
       player,
       level: cloneLevel(this.level),
     };
   }
 
-  private createPlayer(): PlayerController {
+  private createPlayer(x = this.level.startX): PlayerController {
     const height = PLATFORMER_CONFIG.playerHeight * this.scale;
     return new PlayerController({
-      x: this.level.startX,
+      x,
       y: this.level.groundY - height,
       scale: this.scale,
     });
@@ -195,7 +226,9 @@ export class GameController {
       if (circleIntersectsRect(object.x, object.y, object.radius, playerBounds)) {
         object.collected = true;
         this.collectibles += 1;
+        if (object.kind !== 'FRUIT') this.stars += 1;
         this.score += object.value;
+        this.setFeedback('COLLECTIBLE', object.x, object.y, `+${object.value}`);
       }
     }
   }
@@ -208,6 +241,7 @@ export class GameController {
       if (hitbox && intersects(hitbox, enemyBounds)) {
         object.defeated = true;
         this.score += PLATFORMER_CONFIG.enemyScore;
+        this.setFeedback('ENEMY_HIT', object.x + object.width / 2, object.y, 'NICE SWING!');
         continue;
       }
       if (intersects(playerBounds, enemyBounds)) {
@@ -228,7 +262,34 @@ export class GameController {
     if (
       finish?.type === 'FINISH' &&
       playerBounds.x + playerBounds.width >= finish.x
-    ) this.finish('COMPLETE');
+    ) {
+      this.setFeedback('FINISH', finish.x, this.level.groundY - 96, 'GREAT JOB!');
+      this.finish('COMPLETE');
+    }
+  }
+
+  private updateCheckpoint(playerX: number): void {
+    for (const checkpointX of this.level.checkpoints ?? []) {
+      if (checkpointX <= playerX && checkpointX > this.checkpointX) {
+        this.checkpointX = checkpointX;
+      }
+    }
+  }
+
+  private setFeedback(
+    type: PlatformerFeedbackType,
+    x: number,
+    y: number,
+    label: string,
+  ): void {
+    this.feedback = {
+      id: ++this.feedbackId,
+      type,
+      x,
+      y,
+      label,
+      time: this.elapsedSeconds,
+    };
   }
 
   private finish(status: 'COMPLETE' | 'GAME_OVER'): void {
@@ -252,5 +313,7 @@ function cloneLevel(level: PlatformerLevel): PlatformerLevel {
   return {
     ...level,
     objects: level.objects.map((object) => ({ ...object })),
+    checkpoints: level.checkpoints ? [...level.checkpoints] : undefined,
+    crouchGates: level.crouchGates?.map((gate) => ({ ...gate })),
   };
 }

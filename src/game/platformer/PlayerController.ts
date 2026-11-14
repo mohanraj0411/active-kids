@@ -154,6 +154,9 @@ export class PlayerController {
       crouching: this.crouching,
       attacking: this.attackElapsed !== null,
       attackHitActive: this.isAttackHitActive(),
+      attackProgress: this.attackElapsed === null
+        ? 0
+        : clamp(this.attackElapsed / this.getAttackDuration(), 0, 1),
       animationTime: this.animationTime,
     };
   }

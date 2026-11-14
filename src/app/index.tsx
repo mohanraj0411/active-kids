@@ -5,5 +5,9 @@ import { HomeScreen } from '../screens/HomeScreen';
 export default function HomeRoute() {
   const router = useRouter();
 
-  return <HomeScreen onStartGame={() => router.push('/game')} />;
+  return (
+    <HomeScreen
+      onStartGame={() => router.push('/game')}
+    />
+  );
 }
