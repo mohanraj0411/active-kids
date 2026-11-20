@@ -1,0 +1,368 @@
+# INTERNAL JOB DEMAND MATCHING PROMPT
+
+## PURPOSE
+
+Review the internal job demand sheet.
+
+Find the job demands that best match my current skills and career profile.
+
+Rank the demands from highest match to lowest match.
+
+Do not select a demand only because one skill matches.
+
+Evaluate the complete demand.
+
+## MY CURRENT PROFILE
+
+Role:
+Frontend Architect / Technical Lead / Staff Frontend Engineer
+
+Experience:
+12+ years
+
+Preferred location:
+Chennai
+
+Primary skills:
+- React.js
+- JavaScript
+- TypeScript
+- Vue.js
+- Next.js
+- Remix.js
+- Node.js
+- Express.js
+- HTML
+- CSS
+- SCSS
+- Webpack
+- Micro-frontends
+- Module Federation
+- Redux
+- React Query
+- REST APIs
+- GraphQL
+- SSR
+- SSG
+- ISR
+- Frontend performance
+- Web application architecture
+- Design systems
+- AWS
+- CI/CD
+- Docker
+- Technical leadership
+- Architecture governance
+- Solution design
+- Code review
+- Technical mentoring
+- Cross-team delivery
+
+Secondary skills:
+- React Native
+- API design
+- Microservices
+- JWT
+- OAuth2
+- Cloud architecture
+
+Current career direction:
+- Frontend Architect
+- Application Architect
+- Technical Lead
+- Staff Frontend Engineer
+- Full Stack Architect with strong frontend ownership
+
+## DEMAND SHEET COLUMNS
+
+Use these columns when they are available:
+
+- Reported
+- Indent Id
+- Business Relation
+- Business Unit
+- Grade
+- Required Designation
+- Skill1
+- Skill2
+- Start Date
+- Month
+- Requester
+- Responsible
+- Location
+- Experience
+- OU
+
+## MATCHING RULES
+
+Use the following priority order.
+
+### RULE 1 — PRIMARY SKILL MATCH
+
+Give the highest score to demands that contain:
+
+- React
+- React.js
+- JavaScript
+- TypeScript
+- Vue
+- Next.js
+- Node.js
+- Frontend
+- UI
+- Web
+- Micro-frontend
+- Application Architecture
+
+Give a high score to demands that contain:
+
+- AWS
+- CI/CD
+- REST
+- GraphQL
+- Webpack
+- Design System
+- Performance
+- Full Stack
+
+### RULE 2 — ROLE MATCH
+
+Give the highest score to these designations:
+
+1. Architect
+2. Application Architect
+3. Solution Architect
+4. Frontend Architect
+5. Technical Lead
+6. Lead Engineer
+7. Staff Engineer
+8. Senior Technical Lead
+9. Full Stack Architect
+
+Give a medium score to:
+
+- Senior Developer
+- Senior Software Engineer
+- Full Stack Developer
+
+Give a low score to roles that are mainly:
+
+- QA
+- Testing
+- Manual Testing
+- Business Analyst
+- Project Management
+- Non-technical management
+- Database administration
+- Infrastructure administration
+
+### RULE 3 — SKILL COMBINATION
+
+Give a higher score when Skill1 and Skill2 both match my profile.
+
+Give the highest preference to demands with combinations such as:
+
+- React + JavaScript
+- React + TypeScript
+- React + Node.js
+- React + AWS
+- React + Next.js
+- Vue + JavaScript
+- Vue + TypeScript
+- JavaScript + TypeScript
+- Frontend + Node.js
+- Frontend + AWS
+- React + Microservices
+- React + API
+- Frontend + Architecture
+
+Do not reject a demand only because Skill2 is not an exact match.
+
+Use transferable skills when the primary role is a strong match.
+
+### RULE 4 — EXPERIENCE
+
+Compare the demand experience with my 12+ years of experience.
+
+Prefer demands that require:
+
+- 8+ years
+- 10+ years
+- 12+ years
+
+Do not reject a strong demand because the requested experience is slightly lower.
+
+### RULE 5 — LOCATION
+
+Give the highest preference to:
+
+- Chennai
+- Remote
+
+Give a lower score to other locations.
+
+Clearly identify demands that require relocation.
+
+### RULE 6 — CAREER VALUE
+
+Give a higher score to a demand when it can improve my career toward:
+
+- Frontend Architect
+- Application Architect
+- Solution Architect
+- Technical Lead
+- Staff Engineer
+- AI-ready software architecture
+- Full Stack Architecture
+
+Do not rank a role highly only because it is easy to obtain.
+
+Prefer roles that improve my long-term technical career.
+
+### RULE 7 — TECHNOLOGY GAP
+
+Identify technologies that are required by the demand but are not strong skills in my profile.
+
+Examples include:
+
+- Java
+- Spring Boot
+- Kafka
+- Kubernetes
+- Prometheus
+- ELK
+- Advanced distributed systems
+
+Do not automatically reject a demand because of one technology gap.
+
+Classify the gap as:
+
+- Small
+- Medium
+- Large
+
+### RULE 8 — APPiAN AND RPA
+
+Treat Appian, Appian BPM, Appian RPA, and similar low-code/RPA roles as a separate category.
+
+Do not rank them above strong React, frontend, application architecture, or full-stack demands.
+
+Include them only when they have clear architectural or technical leadership value.
+
+### RULE 9 — DUPLICATES
+
+If the same Indent Id appears multiple times, group the records together.
+
+Show the best matching record for the Indent Id.
+
+Do not count duplicate records as separate opportunities.
+
+## MATCH SCORE
+
+Calculate a score from 0 to 100.
+
+Use this weighting:
+
+- 30 points — Skill1 match
+- 20 points — Skill2 match
+- 20 points — Required Designation match
+- 10 points — Experience match
+- 10 points — Location match
+- 10 points — Career growth value
+
+Use this classification:
+
+- 90–100: Excellent Match
+- 80–89: Strong Match
+- 70–79: Good Match
+- 60–69: Possible Match
+- Below 60: Weak Match
+
+## OUTPUT
+
+Return the results in this order:
+
+### 1. TOP 10 DEMANDS
+
+Create a table with these columns:
+
+| Rank | Match Score | Match Level | Indent Id | Required Designation | Skill1 | Skill2 | Grade | Experience | Location | Start Date | Career Value | Skill Gap |
+
+### 2. BEST DEMAND
+
+Select one demand as:
+
+BEST MATCH
+
+Show:
+
+- Indent Id
+- Required Designation
+- Skill1
+- Skill2
+- Grade
+- Experience
+- Location
+- Start Date
+- Match Score
+
+Then give a short reason.
+
+Use no more than 5 sentences.
+
+### 3. TOP 3 CAREER OPTIONS
+
+Show:
+
+1. Best technical match
+2. Best career-growth match
+3. Best fallback match
+
+For each option, give:
+
+- Match score
+- Why it matches
+- Main skill gap
+- Career benefit
+
+### 4. DEMANDS TO AVOID
+
+List demands below 60%.
+
+Give one short reason for each.
+
+### 5. SKILL GAP SUMMARY
+
+Identify the most common missing skills from the top 10 demands.
+
+Group them into:
+
+- High priority
+- Medium priority
+- Low priority
+
+## IMPORTANT RULES
+
+Do not invent information.
+
+Use only information present in the demand sheet and my profile.
+
+Do not change Skill1 or Skill2.
+
+Do not assume that a similar technology is an exact match.
+
+Clearly mark transferable skills.
+
+Clearly mark missing skills.
+
+Do not recommend a role only because its title is senior.
+
+Prioritize technical fit and long-term career value.
+
+If the sheet contains insufficient information, state:
+
+"Insufficient information for a reliable match."
+
+Do not ask unnecessary questions.
+
+Return the final result in a concise and structured format.
