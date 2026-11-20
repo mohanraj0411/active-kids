@@ -1,368 +1,245 @@
-# INTERNAL JOB DEMAND MATCHING PROMPT
+
+# INTERNAL DEMAND EMAIL GENERATION PROMPT
 
 ## PURPOSE
 
-Review the internal job demand sheet.
-
-Find the job demands that best match my current skills and career profile.
-
-Rank the demands from highest match to lowest match.
-
-Do not select a demand only because one skill matches.
-
-Evaluate the complete demand.
-
-## MY CURRENT PROFILE
-
-Role:
-Frontend Architect / Technical Lead / Staff Frontend Engineer
-
-Experience:
-12+ years
-
-Preferred location:
-Chennai
-
-Primary skills:
-- React.js
-- JavaScript
-- TypeScript
-- Vue.js
-- Next.js
-- Remix.js
-- Node.js
-- Express.js
-- HTML
-- CSS
-- SCSS
-- Webpack
-- Micro-frontends
-- Module Federation
-- Redux
-- React Query
-- REST APIs
-- GraphQL
-- SSR
-- SSG
-- ISR
-- Frontend performance
-- Web application architecture
-- Design systems
-- AWS
-- CI/CD
-- Docker
-- Technical leadership
-- Architecture governance
-- Solution design
-- Code review
-- Technical mentoring
-- Cross-team delivery
-
-Secondary skills:
-- React Native
-- API design
-- Microservices
-- JWT
-- OAuth2
-- Cloud architecture
-
-Current career direction:
-- Frontend Architect
-- Application Architect
-- Technical Lead
-- Staff Frontend Engineer
-- Full Stack Architect with strong frontend ownership
-
-## DEMAND SHEET COLUMNS
-
-Use these columns when they are available:
-
-- Reported
-- Indent Id
-- Business Relation
-- Business Unit
-- Grade
-- Required Designation
-- Skill1
-- Skill2
-- Start Date
-- Month
-- Requester
-- Responsible
-- Location
-- Experience
-- OU
-
-## MATCHING RULES
-
-Use the following priority order.
-
-### RULE 1 — PRIMARY SKILL MATCH
-
-Give the highest score to demands that contain:
-
-- React
-- React.js
-- JavaScript
-- TypeScript
-- Vue
-- Next.js
-- Node.js
-- Frontend
-- UI
-- Web
-- Micro-frontend
-- Application Architecture
+Create an internal email for the selected job demand.
 
-Give a high score to demands that contain:
+The demand has already been evaluated and scored.
 
-- AWS
-- CI/CD
-- REST
-- GraphQL
-- Webpack
-- Design System
-- Performance
-- Full Stack
+Do not calculate a new score.
 
-### RULE 2 — ROLE MATCH
+Do not re-rank the demands.
 
-Give the highest score to these designations:
+Use the demand selected by the previous analysis.
 
-1. Architect
-2. Application Architect
-3. Solution Architect
-4. Frontend Architect
-5. Technical Lead
-6. Lead Engineer
-7. Staff Engineer
-8. Senior Technical Lead
-9. Full Stack Architect
+Follow the required company email format.
 
-Give a medium score to:
+Follow all information-security rules.
 
-- Senior Developer
-- Senior Software Engineer
-- Full Stack Developer
+---
 
-Give a low score to roles that are mainly:
+## INPUT
 
-- QA
-- Testing
-- Manual Testing
-- Business Analyst
-- Project Management
-- Non-technical management
-- Database administration
-- Infrastructure administration
+Use the following information from the previous analysis:
 
-### RULE 3 — SKILL COMBINATION
+- Employee Name
+- Emp Code
+- Employee Grade
+- Employee Location
+- Skill Breakup
+- Selected Demand
+- Match Score
+- Match Level
+- Skill Gap
 
-Give a higher score when Skill1 and Skill2 both match my profile.
+Use the selected demand data exactly as provided.
 
-Give the highest preference to demands with combinations such as:
+---
 
-- React + JavaScript
-- React + TypeScript
-- React + Node.js
-- React + AWS
-- React + Next.js
-- Vue + JavaScript
-- Vue + TypeScript
-- JavaScript + TypeScript
-- Frontend + Node.js
-- Frontend + AWS
-- React + Microservices
-- React + API
-- Frontend + Architecture
+## INFORMATION SECURITY
 
-Do not reject a demand only because Skill2 is not an exact match.
+The demand information is company-confidential.
 
-Use transferable skills when the primary role is a strong match.
+The email is for an authorized internal recipient only.
 
-### RULE 4 — EXPERIENCE
+Do not:
 
-Compare the demand experience with my 12+ years of experience.
+- Share the demand sheet.
+- Attach the demand sheet.
+- Include the complete demand sheet.
+- Include unrelated demands.
+- Include screenshots.
+- Include personal email addresses.
+- Include external recipients.
+- Mention WhatsApp.
+- Mention social media.
+- Mention personal devices.
+- Mention personal cloud storage.
+- Suggest forwarding the demand information externally.
+- Add any information that is not required for the internal opportunity.
 
-Prefer demands that require:
+Use only the information required for the internal job opportunity.
 
-- 8+ years
-- 10+ years
-- 12+ years
+---
 
-Do not reject a strong demand because the requested experience is slightly lower.
+## SUBJECT
 
-### RULE 5 — LOCATION
+Use this exact subject format:
 
-Give the highest preference to:
+Name (Skill)_demand sheet
 
-- Chennai
-- Remote
+Example:
 
-Give a lower score to other locations.
+Mohan Raj (React)_demand sheet
 
-Clearly identify demands that require relocation.
+Rules:
 
-### RULE 6 — CAREER VALUE
+- Use the employee name.
+- Use the primary skill from the selected demand.
+- Do not add extra words.
+- Do not add the match score to the subject.
+- Do not add the Indent Id to the subject.
 
-Give a higher score to a demand when it can improve my career toward:
+---
 
-- Frontend Architect
-- Application Architect
-- Solution Architect
-- Technical Lead
-- Staff Engineer
-- AI-ready software architecture
-- Full Stack Architecture
+## RESOURCE DETAILS
 
-Do not rank a role highly only because it is easy to obtain.
+Use this exact format:
 
-Prefer roles that improve my long-term technical career.
+| Emp Code | Emp Name | Grade | Location | Skill Breakup |
+|---|---|---|---|---|
+| [Emp Code] | [Emp Name] | [Grade] | [Location] | [Relevant skills] |
 
-### RULE 7 — TECHNOLOGY GAP
+Use the employee information from the input.
 
-Identify technologies that are required by the demand but are not strong skills in my profile.
+Do not invent missing information.
 
-Examples include:
+If a required employee field is not available, use:
 
-- Java
-- Spring Boot
-- Kafka
-- Kubernetes
-- Prometheus
-- ELK
-- Advanced distributed systems
+[REQUIRED INFORMATION]
 
-Do not automatically reject a demand because of one technology gap.
+Do not guess.
 
-Classify the gap as:
+For Skill Breakup, include only skills relevant to the selected demand.
 
-- Small
-- Medium
-- Large
+---
 
-### RULE 8 — APPiAN AND RPA
+## DEMAND DETAILS
 
-Treat Appian, Appian BPM, Appian RPA, and similar low-code/RPA roles as a separate category.
+Use this exact format:
 
-Do not rank them above strong React, frontend, application architecture, or full-stack demands.
+| Indent Id | Business Relation | Business Unit | Grade | Skill1 | Requester Name | Skill2 | Location | Experience Required | OU |
+|---|---|---|---|---|---|---|---|---|---|
 
-Include them only when they have clear architectural or technical leadership value.
+Copy the values from the selected demand.
 
-### RULE 9 — DUPLICATES
+Do not modify the values.
 
-If the same Indent Id appears multiple times, group the records together.
+Do not invent missing values.
 
-Show the best matching record for the Indent Id.
+Do not add fields that are not present.
 
-Do not count duplicate records as separate opportunities.
+---
 
-## MATCH SCORE
+## EMAIL BODY
 
-Calculate a score from 0 to 100.
+Write a concise and professional internal email.
 
-Use this weighting:
+The email must:
 
-- 30 points — Skill1 match
-- 20 points — Skill2 match
-- 20 points — Required Designation match
-- 10 points — Experience match
-- 10 points — Location match
-- 10 points — Career growth value
+1. Address the authorized internal recipient professionally.
+2. State that I am interested in the selected internal opportunity.
+3. Provide the resource details.
+4. Provide the selected demand details.
+5. Mention the relevant skill alignment.
+6. Mention the match score only if useful.
+7. Mention the main skill gap only if useful.
+8. Request consideration for the opportunity.
+9. End with a professional closing.
 
-Use this classification:
+Do not include the complete scoring analysis.
 
-- 90–100: Excellent Match
-- 80–89: Strong Match
-- 70–79: Good Match
-- 60–69: Possible Match
-- Below 60: Weak Match
+Do not include the ranking of other demands.
+
+Do not include unrelated opportunities.
+
+Do not explain the scoring methodology.
+
+Do not include information-security instructions in the email.
+
+---
+
+## WRITING STYLE
+
+Use:
+
+- Professional business English.
+- Short sentences.
+- Clear wording.
+- Direct language.
+- Internal corporate tone.
+
+Avoid:
+
+- Excessive explanation.
+- Marketing language.
+- Unnecessary technical details.
+- Claims that are not supported by the input.
+- Informal language.
+- Emojis.
+
+---
+
+## FINAL VALIDATION
+
+Before producing the email, verify:
+
+[ ] The selected demand comes from the previous analysis.
+
+[ ] No new score is calculated.
+
+[ ] The employee name is correct.
+
+[ ] The Emp Code is not invented.
+
+[ ] The Grade is correct.
+
+[ ] The Location is correct.
+
+[ ] The Skill Breakup is relevant.
+
+[ ] The Indent Id is correct.
+
+[ ] Business Relation is correct.
+
+[ ] Business Unit is correct.
+
+[ ] Demand Grade is correct.
+
+[ ] Skill1 is correct.
+
+[ ] Requester Name is correct.
+
+[ ] Skill2 is correct.
+
+[ ] Demand Location is correct.
+
+[ ] Experience Required is correct.
+
+[ ] OU is correct.
+
+[ ] Subject follows exactly:
+
+Name (Skill)_demand sheet
+
+[ ] The complete demand sheet is not included.
+
+[ ] Unrelated demands are not included.
+
+[ ] No external or unauthorized sharing is suggested.
+
+[ ] No personal-device sharing is suggested.
+
+[ ] No WhatsApp or social-media sharing is suggested.
+
+[ ] No information is invented.
+
+[ ] The email is suitable for an approved company channel.
+
+---
 
 ## OUTPUT
 
-Return the results in this order:
+Return only the email draft.
 
-### 1. TOP 10 DEMANDS
+Do not return:
 
-Create a table with these columns:
+- Match analysis
+- Score calculation
+- Ranking
+- Explanation
+- Recommendations
+- Additional commentary
 
-| Rank | Match Score | Match Level | Indent Id | Required Designation | Skill1 | Skill2 | Grade | Experience | Location | Start Date | Career Value | Skill Gap |
-
-### 2. BEST DEMAND
-
-Select one demand as:
-
-BEST MATCH
-
-Show:
-
-- Indent Id
-- Required Designation
-- Skill1
-- Skill2
-- Grade
-- Experience
-- Location
-- Start Date
-- Match Score
-
-Then give a short reason.
-
-Use no more than 5 sentences.
-
-### 3. TOP 3 CAREER OPTIONS
-
-Show:
-
-1. Best technical match
-2. Best career-growth match
-3. Best fallback match
-
-For each option, give:
-
-- Match score
-- Why it matches
-- Main skill gap
-- Career benefit
-
-### 4. DEMANDS TO AVOID
-
-List demands below 60%.
-
-Give one short reason for each.
-
-### 5. SKILL GAP SUMMARY
-
-Identify the most common missing skills from the top 10 demands.
-
-Group them into:
-
-- High priority
-- Medium priority
-- Low priority
-
-## IMPORTANT RULES
-
-Do not invent information.
-
-Use only information present in the demand sheet and my profile.
-
-Do not change Skill1 or Skill2.
-
-Do not assume that a similar technology is an exact match.
-
-Clearly mark transferable skills.
-
-Clearly mark missing skills.
-
-Do not recommend a role only because its title is senior.
-
-Prioritize technical fit and long-term career value.
-
-If the sheet contains insufficient information, state:
-
-"Insufficient information for a reliable match."
-
-Do not ask unnecessary questions.
-
-Return the final result in a concise and structured format.
+The output must be ready to send through an approved company email channel.
