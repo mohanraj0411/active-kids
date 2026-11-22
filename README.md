@@ -59,7 +59,7 @@ Native build output is generated with Expo Prebuild; do not hand-edit generated
 - The overlay draws the 33-point skeleton over the preview, including direct
   nose-to-eye connections. The library aligns the overlay to the camera's
   aspect-fill preview; front-camera inference and preview are mirrored together.
-- Inference and callback rates are requested at 15 FPS. Actual observed,
+- Inference and callback rates target 20 FPS. Actual observed,
   inference, and result FPS come from native runtime metrics. The debug panel is
   development-only and can be disabled with `DEBUG_POSE` in
   `src/detection/poseConfig.ts`.
@@ -124,17 +124,20 @@ npm run test:motion
 
 ## Local platformer
 
-`PLAY` opens the platformer directly. The front camera, MediaPipe pose
-detection, Phase C `MotionController`, `GameInputController`, `GameController`,
-and renderer all run on the phone. The setup checks for a visible full body,
-then starts a fullscreen landscape level. Android's system screen mirroring can
-show the same display on a TV; no casting service is built into Active Kids.
+`PLAY` opens an input chooser with **BODY**, **TOUCH**, and **ASSIST**. Body
+uses camera pose detection and checks full-body framing. Touch starts directly
+without camera permission. Assist begins with Touch active and can add reduced
+torso-lean control without a full-body gate; the touch controls remain
+available. All sources use one `GameInputController` boundary and switching
+sources releases held movement and crouch.
 
 The platformer keeps the local camera-to-game pipeline and adds an original
 animated adventurer, fruit and star feedback, seven gap sections, friendly
 spiders, checkpoint retries, and a celebratory result. Camera setup includes
 full-body guidance, movement cues, and a short safety reminder. Development
-builds offer **DEV INPUT** and an opt-in **DEBUG** overlay. See
+builds offer an opt-in diagnostics overlay and a five-minute performance
+collection control. Static level geometry is immutable and reused; runtime
+entities are reused between render snapshots. See
 [`docs/PLATFORMER.md`](docs/PLATFORMER.md) for the game rules and
 [`docs/MOBILE_GAME.md`](docs/MOBILE_GAME.md) for the phone-first flow,
 screen-mirroring setup, safety behavior, and device test procedure.
@@ -143,15 +146,18 @@ Run deterministic platformer checks with:
 
 ```bash
 npm run test:platformer
+npm run test:adaptive
+npm run test:network
+npx expo export --platform android
+git diff --check
 ```
 
-## Experimental network code
+## TV receiver
 
-The old LAN protocol and relay remain isolated as experimental infrastructure
-in `src/network/` and `scripts/network-host.cjs`. They are not used by the app's
-normal routes or required for gameplay. The `ws` package is a development
-dependency for the loopback relay and its tests. Run the experimental protocol
-checks with:
+The optional phone controller and TV receiver use the local network transport
+in `src/network/`; the local phone game does not require it. See
+[`docs/TV_RECEIVER.md`](docs/TV_RECEIVER.md) for setup and validation. Run the
+protocol and safety tests with:
 
 ```bash
 npm run test:network
@@ -169,7 +175,8 @@ npx expo lint
 npx expo-doctor
 ```
 
-Physical Android testing is still required for camera behavior during hidden
-preview, pose accuracy, landscape/fullscreen layout, screen mirroring, device
-FPS, and sustained stability. Do not use Expo Go for MediaPipe; use a rebuilt
-development build that includes the current native dependencies.
+Phase 10 physical testing has not been run in this environment. Do not claim
+device rates, latency, camera accuracy, or sustained stability until the
+five-minute Touch, Body, and Assist checks are completed on real Android
+devices. Do not use Expo Go for MediaPipe; use a rebuilt development build that
+includes the current native dependencies.

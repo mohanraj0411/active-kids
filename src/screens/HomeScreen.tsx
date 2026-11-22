@@ -9,9 +9,10 @@ import { colors, radius, spacing } from '../theme';
 
 type HomeScreenProps = {
   onStartGame: () => void;
+  onPlayOnTv: () => void;
 };
 
-export function HomeScreen({ onStartGame }: HomeScreenProps) {
+export function HomeScreen({ onStartGame, onPlayOnTv }: HomeScreenProps) {
   const [permission] = useCameraPermissions();
   let permissionState: CameraPermissionState = 'checking';
   if (permission !== null) {
@@ -45,8 +46,8 @@ export function HomeScreen({ onStartGame }: HomeScreenProps) {
           </View>
           <Text style={styles.title}>Your body is the controller.</Text>
           <Text style={styles.subtitle}>
-            Run, jump, swing, and crouch to guide your explorer. Play on this
-            phone or mirror the screen to your TV.
+            Run, jump, swing, and crouch to guide your explorer. Play here or
+            connect this phone to an Active Kids TV receiver.
           </Text>
           <View style={styles.moveList} accessibilityLabel="Run, jump, swing, and crouch">
             {[
@@ -71,9 +72,16 @@ export function HomeScreen({ onStartGame }: HomeScreenProps) {
           />
 
           <AppButton
-            title="PLAY"
-            accessibilityLabel="Start game"
+            title="PLAY ON PHONE"
+            accessibilityLabel="Play on this phone"
             onPress={onStartGame}
+            style={styles.startButton}
+          />
+          <AppButton
+            title="PLAY ON TV"
+            accessibilityLabel="Find and connect to an Active Kids TV receiver"
+            variant="secondary"
+            onPress={onPlayOnTv}
             style={styles.startButton}
           />
 

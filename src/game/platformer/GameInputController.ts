@@ -1,38 +1,109 @@
-import type { MotionEvent, MotionEventType, MotionType } from '../../motion/controllerTypes';
+import type {
+  HorizontalMovement,
+  MotionEvent,
+  MotionEventType,
+  MotionType,
+} from '../../motion/controllerTypes';
 import { GameController } from './GameController';
 import type { DevMotionEventType } from './types';
+import type { GameAction, GameInputSource } from './inputActions';
 
-/** Maps the Phase C event contract to game actions; it contains no pose math. */
+/** Maps Body, Touch, Gamepad-ready, and Network actions into the local game. */
 export class GameInputController {
+  private activeSource: GameInputSource = 'BODY';
+
   constructor(private readonly game: GameController) {}
 
-  handleMotionEvent(event: MotionEvent): void {
-    this.game.noteMotionEvent(event);
-    switch (event.type) {
-      case 'RUN_START':
+  get currentSource(): GameInputSource {
+    return this.activeSource;
+  }
+
+  /** Changing owners always clears held movement and crouch before accepting input. */
+  selectSource(source: GameInputSource): void {
+    if (source === this.activeSource) return;
+    this.game.releaseInputs();
+    this.activeSource = source;
+  }
+
+  releaseAll(): void {
+    this.game.releaseInputs();
+  }
+
+  dispatch(source: GameInputSource, action: GameAction): boolean {
+    if (source !== this.activeSource) return false;
+
+    const isLifecycle = action.type === 'START' || action.type === 'PAUSE' ||
+      action.type === 'RESUME' || action.type === 'RESTART';
+    if (!isLifecycle && this.game.currentStatus !== 'PLAYING') {
+      if (action.type === 'RUN' && action.active && this.game.currentStatus === 'READY') {
         this.game.setRunning(true);
-        break;
-      case 'RUN_STOP':
-        this.game.setRunning(false);
-        break;
+        return true;
+      }
+      if (action.type === 'RUN' && !action.active) this.game.releaseInputs();
+      if (action.type === 'CROUCH' && !action.active) this.game.releaseInputs();
+      if (action.type === 'MOVE' && action.movement.direction === 0) this.game.releaseInputs();
+      return false;
+    }
+
+    switch (action.type) {
+      case 'MOVE':
+        this.game.setHorizontalMovement(action.movement);
+        return true;
+      case 'RUN':
+        this.game.setRunning(action.active);
+        return true;
       case 'JUMP':
-        this.game.jump();
-        break;
-      case 'ARM_SWING':
-        this.game.attack();
-        break;
-      case 'CROUCH_START':
-        this.game.setCrouching(true);
-        break;
-      case 'CROUCH_END':
-        this.game.setCrouching(false);
-        break;
+        return this.game.jump();
+      case 'ATTACK':
+        return this.game.attack();
+      case 'CROUCH':
+        this.game.setCrouching(action.active);
+        return true;
+      case 'START':
+        if (this.game.currentStatus === 'COMPLETE' || this.game.currentStatus === 'GAME_OVER') this.game.restart();
+        this.game.start();
+        return true;
+      case 'PAUSE':
+        this.game.pause();
+        return true;
+      case 'RESUME':
+        this.game.resume();
+        return true;
+      case 'RESTART':
+        this.game.restart();
+        this.game.start();
+        return true;
     }
   }
 
-  /** Dev keys/buttons create the same event shape consumed from MotionController. */
-  handleDeveloperInput(type: DevMotionEventType): void {
-    this.handleMotionEvent(createMotionEvent(type));
+  handleMotionEvent(event: MotionEvent, source: GameInputSource = 'BODY'): boolean {
+    const action = motionEventToAction(event.type);
+    const accepted = this.dispatch(source, action);
+    if (accepted) this.game.noteMotionEvent(event);
+    return accepted;
+  }
+
+  handleHorizontalMovement(
+    movement: HorizontalMovement,
+    source: GameInputSource = this.activeSource,
+  ): boolean {
+    return this.dispatch(source, { type: 'MOVE', movement });
+  }
+
+  /** Touch buttons and keyboard test helpers share the same action mapping. */
+  handleDeveloperInput(type: DevMotionEventType, source: GameInputSource = this.activeSource): boolean {
+    return this.handleMotionEvent(createMotionEvent(type), source);
+  }
+}
+
+function motionEventToAction(type: MotionEventType): GameAction {
+  switch (type) {
+    case 'RUN_START': return { type: 'RUN', active: true };
+    case 'RUN_STOP': return { type: 'RUN', active: false };
+    case 'JUMP': return { type: 'JUMP' };
+    case 'ARM_SWING': return { type: 'ATTACK' };
+    case 'CROUCH_START': return { type: 'CROUCH', active: true };
+    case 'CROUCH_END': return { type: 'CROUCH', active: false };
   }
 }
 

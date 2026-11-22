@@ -1,5 +1,7 @@
 export { MotionEngine, getMotionHighlights } from './MotionEngine';
 export { MotionController } from './MotionController';
+export { BodyLeanController, calculateBodyLean } from './BodyLeanController';
+export { MotionProcessingMeter } from './MotionProcessingMeter';
 export {
   calculateAngle,
   calculateBodyCenter,
@@ -11,8 +13,12 @@ export {
 } from './geometry';
 export { MOTION_CONFIG } from './thresholds';
 export { MOTION_CONTROLLER_CONFIG } from './motionThresholds';
+export { BODY_LEAN_CONFIG } from './motionThresholds';
 export type {
+  BodyLeanState,
   ContinuousMotionState,
+  HorizontalDirection,
+  HorizontalMovement,
   JumpControllerPhase,
   MotionControllerDiagnostics,
   MotionControllerUpdate,

@@ -4,6 +4,7 @@ import { clampUnit } from './geometry';
 import { MOTION_CONTROLLER_CONFIG } from './motionThresholds';
 import type { MotionBody, MotionPoint, MotionResult } from './types';
 import type {
+  BodyLeanState,
   ContinuousMotionState,
   JumpControllerPhase,
   MotionControllerDiagnostics,
@@ -11,6 +12,7 @@ import type {
   MotionEvent,
 } from './controllerTypes';
 import { PoseSmoother } from './smoothing/PoseSmoother';
+import { BodyLeanController } from './BodyLeanController';
 
 interface RunSample {
   timestamp: number;
@@ -58,9 +60,11 @@ const EMPTY_RESULT: Omit<MotionResult, 'timestamp' | 'confidence'> = {
 export class MotionController {
   private readonly smoother = new PoseSmoother();
   private readonly motionEngine = new MotionEngine();
+  private readonly bodyLeanController = new BodyLeanController();
   private readonly runHistory: RunSample[] = [];
   private running = false;
   private crouching = false;
+  private trackingInputsReleased = false;
   private jumpPhase: JumpControllerPhase = 'GROUNDED';
   private jumpBaseline: JumpBaseline | null = null;
   private peakHipY: number | null = null;
@@ -128,6 +132,44 @@ export class MotionController {
     return this.motionResult;
   }
 
+  get bodyLeanState(): BodyLeanState {
+    return this.bodyLeanController.current;
+  }
+
+  beginNeutralCalibration(): void {
+    this.bodyLeanController.beginCalibration();
+  }
+
+  completeNeutralCalibration(): BodyLeanState {
+    return this.bodyLeanController.completeCalibration();
+  }
+
+  updateCalibrationPose(frame: PoseResult): BodyLeanState {
+    return this.bodyLeanController.update(frame);
+  }
+
+  /** Called by the camera watchdog if native pose callbacks stop completely. */
+  expireTracking(timestamp: number): MotionEvent[] {
+    this.bodyLeanController.expireTracking();
+    this.smoother.reset();
+    this.motionEngine.reset();
+    const events: MotionEvent[] = [];
+    this.releaseContinuousInputs(timestamp, 0, events);
+    this.running = false;
+    this.crouching = false;
+    this.trackingInputsReleased = true;
+    this.resetRecognitionState();
+    this.trackingInputsReleased = true;
+    if (events.length > 0) this.lastEvent = events[events.length - 1];
+    this.motionResult = {
+      ...EMPTY_RESULT,
+      timestamp,
+      confidence: 0,
+    };
+    this.refreshDiagnostics(timestamp, 0, null, null, null, null);
+    return events;
+  }
+
   getDebugInfo(): MotionControllerDiagnostics {
     return this.diagnostics;
   }
@@ -138,6 +180,8 @@ export class MotionController {
     this.runHistory.length = 0;
     this.running = false;
     this.crouching = false;
+    this.trackingInputsReleased = false;
+    this.bodyLeanController.reset();
     this.jumpPhase = 'GROUNDED';
     this.jumpBaseline = null;
     this.peakHipY = null;
@@ -190,19 +234,27 @@ export class MotionController {
       this.resetTemporalReferences();
     }
     this.lastPoseTimestamp = timestamp;
+    const leanState = this.bodyLeanController.update(frame);
 
     if (!frame.detected || confidence < MOTION_CONTROLLER_CONFIG.minPoseConfidence) {
       this.smoother.reset();
       this.motionResult = this.motionEngine.processPose(frame);
       this.overallInvalidSince ??= timestamp;
-      if (timestamp - this.overallInvalidSince >= MOTION_CONTROLLER_CONFIG.invalidResetMs) {
+      if (
+        timestamp - this.overallInvalidSince >= MOTION_CONTROLLER_CONFIG.trackingLossTimeoutMs &&
+        !this.trackingInputsReleased
+      ) {
         this.releaseContinuousInputs(timestamp, confidence, events);
+        this.trackingInputsReleased = true;
         this.resetRecognitionState();
+        this.trackingInputsReleased = true;
       }
+      if (events.length > 0) this.lastEvent = events[events.length - 1];
       this.refreshDiagnostics(timestamp, confidence, null, null, null, null);
       return events;
     }
 
+    this.trackingInputsReleased = false;
     this.overallInvalidSince = null;
     const stablePose = this.smoother.smooth(frame);
     const result = this.motionEngine.processSmoothedPose(stablePose);
@@ -272,6 +324,15 @@ export class MotionController {
       'right', timestamp, scale, result, events,
     );
     this.processCrouch(result, timestamp, events);
+
+    if (!leanState.isTracking && !leanState.calibrating && !this.trackingInputsReleased) {
+      this.releaseContinuousInputs(timestamp, confidence, events);
+      this.running = false;
+      this.crouching = false;
+      this.trackingInputsReleased = true;
+    } else if (leanState.isTracking) {
+      this.trackingInputsReleased = false;
+    }
 
     if (events.length > 0) this.lastEvent = events[events.length - 1];
 
@@ -565,7 +626,7 @@ export class MotionController {
     const squat = result.gestures.find((gesture) => gesture.type === 'SQUAT');
     if (!squat?.available) {
       this.crouchInvalidSince ??= timestamp;
-      if (timestamp - this.crouchInvalidSince >= MOTION_CONTROLLER_CONFIG.invalidResetMs) {
+      if (timestamp - this.crouchInvalidSince >= MOTION_CONTROLLER_CONFIG.crouchTrackingLossTimeoutMs) {
         if (this.crouching) {
           events.push(makeEvent('CROUCH_END', timestamp, result.confidence));
         }
@@ -694,6 +755,7 @@ export class MotionController {
 
   private resetTemporalReferences(): void {
     this.smoother.reset();
+    this.bodyLeanController.reset();
     this.runHistory.length = 0;
     this.resetRunSequence();
     this.clearJumpVelocityReference();

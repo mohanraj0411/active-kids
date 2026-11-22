@@ -8,6 +8,7 @@ export default function HomeRoute() {
   return (
     <HomeScreen
       onStartGame={() => router.push('/game')}
+      onPlayOnTv={() => router.push('./connect-tv')}
     />
   );
 }

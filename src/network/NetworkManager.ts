@@ -7,6 +7,8 @@ import {
   NETWORK_RECONNECT_DELAYS_MS,
 } from './networkConstants';
 import type {
+  GameEventType,
+  NetworkInputAction,
   NetworkMessage,
   NetworkRole,
 } from './protocol';
@@ -21,6 +23,7 @@ export type ConnectionState =
 
 export interface NetworkSnapshot {
   state: ConnectionState;
+  webSocketOpen: boolean;
   role: NetworkRole;
   sessionId: string | null;
   latencyMs: number | null;
@@ -28,6 +31,9 @@ export interface NetworkSnapshot {
   phoneConnected: boolean;
   lastError: string | null;
   nextSequence: number;
+  pairingCode: string | null;
+  receiverId: string | null;
+  receiverName: string | null;
 }
 
 interface SocketMessageEventLike {
@@ -60,6 +66,7 @@ export interface NetworkManagerOptions {
   scheduler?: NetworkScheduler;
   reconnectDelaysMs?: readonly number[];
   clientId?: string;
+  pairingCode?: string;
   onLog?: (message: string) => void;
 }
 
@@ -78,11 +85,15 @@ export class NetworkManager {
   private readonly scheduler: NetworkScheduler;
   private readonly reconnectDelaysMs: readonly number[];
   private readonly clientId: string;
+  private pairingCode: string | null;
+  private reconnectToken: string | null = null;
   private readonly onLog?: (message: string) => void;
   private readonly stateListeners = new Set<(snapshot: NetworkSnapshot) => void>();
   private readonly messageListeners = new Set<(message: NetworkMessage) => void>();
+  private readonly gameEventListeners = new Set<(event: GameEventType) => void>();
   private socket: WebSocketLike | null = null;
   private state: ConnectionState = 'DISCONNECTED';
+  private webSocketOpen = false;
   private sessionId: string | null = null;
   private latencyMs: number | null = null;
   private tvConnected = false;
@@ -95,6 +106,9 @@ export class NetworkManager {
   private lastHeartbeatAckAt: number | null = null;
   private shouldReconnect = false;
   private fatalFailure = false;
+  private receiverId: string | null = null;
+  private receiverName: string | null = null;
+  private nextGameEventSequence = 1;
 
   constructor(
     private readonly url: string,
@@ -104,6 +118,7 @@ export class NetworkManager {
     this.scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? NETWORK_RECONNECT_DELAYS_MS;
     this.clientId = options.clientId ?? createClientId();
+    this.pairingCode = options.pairingCode ?? null;
     this.onLog = options.onLog;
     this.socketFactory = options.socketFactory ?? ((socketUrl) => {
       if (typeof globalThis.WebSocket !== 'function') {
@@ -116,6 +131,7 @@ export class NetworkManager {
   getSnapshot(): NetworkSnapshot {
     return {
       state: this.state,
+      webSocketOpen: this.webSocketOpen,
       role: this.role,
       sessionId: this.sessionId,
       latencyMs: this.latencyMs,
@@ -123,6 +139,9 @@ export class NetworkManager {
       phoneConnected: this.phoneConnected,
       lastError: this.lastError,
       nextSequence: this.nextSequence,
+      pairingCode: this.pairingCode,
+      receiverId: this.receiverId,
+      receiverName: this.receiverName,
     };
   }
 
@@ -135,6 +154,11 @@ export class NetworkManager {
   subscribeMessages(listener: (message: NetworkMessage) => void): () => void {
     this.messageListeners.add(listener);
     return () => this.messageListeners.delete(listener);
+  }
+
+  subscribeGameEvents(listener: (event: GameEventType) => void): () => void {
+    this.gameEventListeners.add(listener);
+    return () => this.gameEventListeners.delete(listener);
   }
 
   connect(): void {
@@ -151,6 +175,7 @@ export class NetworkManager {
     this.clearTimer('heartbeat');
     const socket = this.socket;
     this.socket = null;
+    this.webSocketOpen = false;
     if (socket?.readyState === SOCKET_OPEN && this.sessionId) {
       this.sendRaw(socket, {
         type: 'DISCONNECT',
@@ -171,28 +196,40 @@ export class NetworkManager {
   }
 
   sendInput(event: MotionEvent): number | null {
-    if (this.role !== 'PHONE_CONTROLLER' || this.state !== 'CONNECTED' || !this.sessionId) {
-      return null;
-    }
-    const sequence = this.nextSequence++;
-    const message = {
-      type: 'INPUT' as const,
-      protocolVersion: NETWORK_PROTOCOL_VERSION,
-      sessionId: this.sessionId,
-      sequence,
-      timestamp: Number.isFinite(event.timestamp) ? event.timestamp : this.scheduler.now(),
+    return this.sendInputPacket('MOTION_EVENT', {
       event: event.type,
       confidence: clampUnit(event.confidence),
       motion: getMotionForEvent(event.type),
-    };
-    if (!this.sendRaw(this.socket, message)) return null;
-    this.log(`INPUT ${event.type} seq=${sequence}`);
-    this.emit();
+      timestamp: event.timestamp,
+    });
+  }
+
+  sendMovement(value: number): number | null {
+    if (!Number.isFinite(value)) return null;
+    return this.sendInputPacket('MOVE', { value: Math.max(-1, Math.min(1, value)) });
+  }
+
+  sendControl(action: Exclude<NetworkInputAction, 'MOTION_EVENT' | 'MOVE'>): number | null {
+    return this.sendInputPacket(action, {});
+  }
+
+  sendGameEvent(event: GameEventType): number | null {
+    if (this.role !== 'TV_HOST' || this.state !== 'CONNECTED' || !this.sessionId) return null;
+    const sequence = this.nextGameEventSequence++;
+    if (!this.sendRaw(this.socket, {
+      type: 'GAME_EVENT',
+      protocolVersion: NETWORK_PROTOCOL_VERSION,
+      sessionId: this.sessionId,
+      sequence,
+      timestamp: this.scheduler.now(),
+      event,
+    })) return null;
     return sequence;
   }
 
   private openSocket(isRetry: boolean): void {
     if (!this.shouldReconnect) return;
+    this.webSocketOpen = false;
     this.setState(isRetry ? 'RECONNECTING' : 'CONNECTING');
     this.lastError = null;
     this.log(`${isRetry ? 'Reconnecting' : 'Connecting'} to ${this.url}`);
@@ -209,12 +246,21 @@ export class NetworkManager {
     this.socket = socket;
     socket.onopen = () => {
       if (this.socket !== socket || !this.shouldReconnect) return;
+      this.webSocketOpen = true;
+      this.emit();
       this.log('WebSocket opened; sending HELLO');
       this.sendRaw(socket, {
         type: 'HELLO',
         protocolVersion: NETWORK_PROTOCOL_VERSION,
         clientId: this.clientId,
         role: this.role,
+        ...(this.role === 'PHONE_CONTROLLER'
+          ? this.reconnectToken
+            ? { reconnectToken: this.reconnectToken }
+            : this.pairingCode
+              ? { pairingCode: this.pairingCode }
+              : {}
+          : {}),
       });
     };
     socket.onmessage = (event) => {
@@ -222,6 +268,7 @@ export class NetworkManager {
     };
     socket.onerror = () => {
       if (this.socket !== socket) return;
+      this.webSocketOpen = false;
       this.lastError = 'WebSocket connection error';
       this.setState('ERROR');
       this.log(this.lastError);
@@ -230,6 +277,7 @@ export class NetworkManager {
     socket.onclose = (event) => {
       if (this.socket !== socket) return;
       this.socket = null;
+      this.webSocketOpen = false;
       this.clearTimer('heartbeat');
       this.lastHeartbeatAckAt = null;
       this.tvConnected = false;
@@ -281,7 +329,14 @@ export class NetworkManager {
       }
       const sessionChanged = this.sessionId !== message.sessionId;
       this.sessionId = message.sessionId;
-      if (sessionChanged && this.role === 'PHONE_CONTROLLER') this.nextSequence = 1;
+      if (message.pairingCode) this.pairingCode = message.pairingCode;
+      if (message.reconnectToken) this.reconnectToken = message.reconnectToken;
+      this.receiverId = message.receiverId ?? null;
+      this.receiverName = message.receiverName ?? null;
+      if (sessionChanged) {
+        this.nextSequence = 1;
+        this.nextGameEventSequence = 1;
+      }
       this.lastHeartbeatAckAt = this.scheduler.now();
       this.lastError = null;
       this.reconnectAttempt = 0;
@@ -301,6 +356,11 @@ export class NetworkManager {
     } else if (message.type === 'ERROR') {
       this.lastError = message.message;
       this.log(`ERROR ${message.code}: ${message.message}`);
+      if (message.code === 'PAIRING_REQUIRED' || message.code === 'PAIRING_REJECTED') {
+        this.fatalFailure = true;
+        this.setState('ERROR');
+        socket.close(1008, message.code);
+      }
       this.emit();
       if (message.code === 'UNSUPPORTED_PROTOCOL') {
         this.fatalFailure = true;
@@ -310,6 +370,33 @@ export class NetworkManager {
     }
 
     for (const listener of this.messageListeners) listener(message);
+    if (message.type === 'GAME_EVENT') {
+      for (const listener of this.gameEventListeners) listener(message.event);
+    }
+  }
+
+  private sendInputPacket(
+    action: NetworkInputAction,
+    payload: { event?: MotionEvent['type']; confidence?: number; motion?: MotionEvent['motion']; value?: number; timestamp?: number },
+  ): number | null {
+    if (this.role !== 'PHONE_CONTROLLER' || this.state !== 'CONNECTED' || !this.sessionId) return null;
+    const sequence = this.nextSequence++;
+    const message = {
+      type: 'INPUT' as const,
+      protocolVersion: NETWORK_PROTOCOL_VERSION,
+      sessionId: this.sessionId,
+      sequence,
+      timestamp: Number.isFinite(payload.timestamp) ? payload.timestamp : this.scheduler.now(),
+      action,
+      ...(payload.event ? { event: payload.event } : {}),
+      ...(payload.confidence !== undefined ? { confidence: payload.confidence } : {}),
+      ...(payload.motion ? { motion: payload.motion } : {}),
+      ...(payload.value !== undefined ? { value: payload.value } : {}),
+    };
+    if (!this.sendRaw(this.socket, message)) return null;
+    this.log(`INPUT ${action} seq=${sequence}`);
+    this.emit();
+    return sequence;
   }
 
   private startHeartbeat(socket: WebSocketLike): void {

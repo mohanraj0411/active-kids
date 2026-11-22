@@ -7,6 +7,9 @@ const path = require('node:path');
 const projectRoot = path.resolve(__dirname, '..');
 const outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'active-kids-motion-'));
 let MotionController;
+let BodyLeanController;
+let calculateBodyLean;
+let MotionProcessingMeter;
 let GameController;
 let GameInputController;
 
@@ -23,11 +26,15 @@ try {
     '--strict',
     '--skipLibCheck',
     path.join(projectRoot, 'src', 'motion', 'MotionController.ts'),
+    path.join(projectRoot, 'src', 'motion', 'BodyLeanController.ts'),
+    path.join(projectRoot, 'src', 'motion', 'MotionProcessingMeter.ts'),
     path.join(projectRoot, 'src', 'game', 'platformer', 'GameController.ts'),
     path.join(projectRoot, 'src', 'game', 'platformer', 'GameInputController.ts'),
   ], { cwd: projectRoot, stdio: 'inherit' });
 
   ({ MotionController } = require(path.join(outputDirectory, 'motion', 'MotionController.js')));
+  ({ BodyLeanController, calculateBodyLean } = require(path.join(outputDirectory, 'motion', 'BodyLeanController.js')));
+  ({ MotionProcessingMeter } = require(path.join(outputDirectory, 'motion', 'MotionProcessingMeter.js')));
   ({ GameController } = require(path.join(outputDirectory, 'game', 'platformer', 'GameController.js')));
   ({ GameInputController } = require(path.join(outputDirectory, 'game', 'platformer', 'GameInputController.js')));
   const tests = [
@@ -37,8 +44,15 @@ try {
     ['standing → crouch → standing', testCrouchLifecycle],
     ['low-confidence pose cannot create action events', testLowConfidence],
     ['tracking loss releases active run and crouch inputs', testTrackingLossReleasesInputs],
+    ['camera callback watchdog releases held run and crouch', testCameraWatchdogReleasesInputs],
     ['run can coexist with swing and jump events', testCombinedMotions],
     ['body-scale changes preserve run recognition', testBodyScale],
+    ['torso-center lean calibration, dead zone, and proportional direction', testBodyLean],
+    ['calibration frames do not trigger gameplay actions', testLeanCalibrationOnly],
+    ['body-lean geometry is stable at different body scales', testBodyLeanScale],
+    ['smoothing suppresses alternating small lean noise', testBodyLeanSmoothing],
+    ['lean input safely releases when tracking is lost', testLeanTrackingLoss],
+    ['motion-processing timing and rate use deterministic measurements', testMotionProcessingMeter],
     ['irregular frame times use measured deltas', testIrregularTiming],
     ['MotionController events drive all local platformer actions', testLocalGameplayIntegration],
   ];
@@ -211,6 +225,32 @@ function testTrackingLossReleasesInputs() {
   assert.equal(crouchingController.state, 'IDLE');
 }
 
+function testCameraWatchdogReleasesInputs() {
+  const runningController = new MotionController();
+  let timestamp = 5_400;
+  for (let index = 0; index < 45; index += 1) {
+    timestamp += 100;
+    runningController.update(makePose(timestamp, { runTimeMs: index * 100 }));
+  }
+  assert.equal(runningController.state, 'RUN');
+  assert.ok(runningController.expireTracking(timestamp + 350).some((event) => event.type === 'RUN_STOP'));
+  assert.equal(runningController.state, 'IDLE');
+  assert.equal(runningController.bodyLeanState.direction, 0);
+
+  const crouchingController = new MotionController();
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    crouchingController.update(makePose(timestamp));
+  }
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    crouchingController.update(makePose(timestamp, { crouch: true }));
+  }
+  assert.equal(crouchingController.state, 'CROUCH');
+  assert.ok(crouchingController.expireTracking(timestamp + 350).some((event) => event.type === 'CROUCH_END'));
+  assert.equal(crouchingController.state, 'IDLE');
+}
+
 function testCombinedMotions() {
   const controller = new MotionController();
   let timestamp = 5_500;
@@ -254,6 +294,139 @@ function testBodyScale() {
     }
     assert.equal(runStarted, true, `run should be recognized at body scale ${bodyScale}`);
   }
+}
+
+function testBodyLean() {
+  const controller = calibratedLeanController(5);
+  let timestamp = 2_000;
+  for (let index = 0; index < 5; index += 1) {
+    timestamp += 100;
+    const neutral = controller.update(makeLeanPose(timestamp, 5));
+    assert.equal(neutral.direction, 0);
+    assert.equal(neutral.intensity, 0);
+  }
+
+  let left;
+  for (let index = 0; index < 8; index += 1) {
+    timestamp += 100;
+    left = controller.update(makeLeanPose(timestamp, -18));
+  }
+  assert.equal(left.direction, -1);
+  assert.ok(left.intensity > 0.35 && left.intensity < 1);
+
+  let right;
+  for (let index = 0; index < 9; index += 1) {
+    timestamp += 100;
+    right = controller.update(makeLeanPose(timestamp, 34));
+  }
+  assert.equal(right.direction, 1);
+  assert.equal(right.intensity, 1);
+  assert.equal(right.calibrated, true);
+}
+
+function testBodyLeanScale() {
+  const regular = calculateBodyLean(makeLeanPose(1_000, 17, 1));
+  const small = calculateBodyLean(makeLeanPose(1_000, 17, 0.58));
+  const large = calculateBodyLean(makeLeanPose(1_000, 17, 1.45));
+  assert.ok(regular && small && large);
+  assert.ok(Math.abs(regular.angleDegrees - small.angleDegrees) < 0.1);
+  assert.ok(Math.abs(regular.angleDegrees - large.angleDegrees) < 0.1);
+}
+
+function testLeanCalibrationOnly() {
+  const controller = new MotionController();
+  controller.beginNeutralCalibration();
+  for (let index = 0; index < 12; index += 1) {
+    controller.updateCalibrationPose(makePose(8_000 + index * 100, {
+      runTimeMs: index * 100,
+      jumpLiftScale: 0.5,
+      leftArmSwingScale: 0.7,
+      crouch: true,
+    }));
+  }
+  assert.equal(controller.state, 'IDLE');
+  assert.equal(controller.bodyLeanState.calibrating, true);
+  assert.equal(controller.bodyLeanState.direction, 0);
+  assert.equal(controller.completeNeutralCalibration().calibrating, false);
+}
+
+function testBodyLeanSmoothing() {
+  const controller = calibratedLeanController(0);
+  let timestamp = 2_000;
+  controller.update(makeLeanPose(timestamp, 0));
+  for (const angle of [12, -12, 12, -12, 12, -12, 12, -12]) {
+    timestamp += 100;
+    const state = controller.update(makeLeanPose(timestamp, angle));
+    assert.equal(state.direction, 0);
+  }
+}
+
+function testLeanTrackingLoss() {
+  const controller = calibratedLeanController(0);
+  let timestamp = 2_000;
+  let state;
+  for (let index = 0; index < 10; index += 1) {
+    timestamp += 100;
+    state = controller.update(makeLeanPose(timestamp, 34));
+  }
+  assert.equal(state.direction, 1);
+  state = controller.update(makeLostPose(timestamp + 100));
+  assert.equal(state.direction, 1);
+  state = controller.update(makeLostPose(timestamp + 351));
+  assert.equal(state.direction, 0);
+  assert.equal(state.intensity, 0);
+}
+
+function testMotionProcessingMeter() {
+  const meter = new MotionProcessingMeter();
+  meter.record(100, 102);
+  meter.record(200, 205);
+  meter.record(300, 304);
+  assert.deepEqual(meter.snapshot(400), {
+    sampleCount: 3,
+    rateHz: 3_000 / 298,
+    averageMs: 11 / 3,
+    maximumMs: 5,
+  });
+  meter.record(400, 399);
+  assert.equal(meter.snapshot(450).sampleCount, 3);
+}
+
+function calibratedLeanController(neutralAngle) {
+  const controller = new BodyLeanController();
+  controller.beginCalibration();
+  for (let index = 0; index < 8; index += 1) {
+    controller.update(makeLeanPose(1_000 + index * 100, neutralAngle));
+  }
+  assert.equal(controller.completeCalibration().calibrated, true);
+  return controller;
+}
+
+function makeLeanPose(timestamp, angleDegrees, bodyScale = 1) {
+  const imageSize = { width: 1_280, height: 720 };
+  const torsoPixels = 180 * bodyScale;
+  const radians = angleDegrees * Math.PI / 180;
+  const hipCenterX = 0.5;
+  const hipCenterY = 0.68;
+  const shoulderCenterX = hipCenterX + Math.sin(radians) * torsoPixels / imageSize.width;
+  const shoulderCenterY = hipCenterY - Math.cos(radians) * torsoPixels / imageSize.height;
+  const score = 0.98;
+  return {
+    timestamp,
+    confidence: score,
+    detected: true,
+    imageSize,
+    landmarks: {
+      leftShoulder: { x: shoulderCenterX - 0.06 * bodyScale, y: shoulderCenterY, confidence: score },
+      rightShoulder: { x: shoulderCenterX + 0.06 * bodyScale, y: shoulderCenterY, confidence: score },
+      leftHip: { x: hipCenterX - 0.045 * bodyScale, y: hipCenterY, confidence: score },
+      rightHip: { x: hipCenterX + 0.045 * bodyScale, y: hipCenterY, confidence: score },
+    },
+  };
+}
+
+function makeLostPose(timestamp) {
+  return { timestamp, confidence: 0, detected: false, landmarks: {} };
 }
 
 function testIrregularTiming() {

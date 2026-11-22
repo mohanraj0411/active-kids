@@ -74,6 +74,9 @@ export class MediaPipePoseAdapter implements PoseDetector<PoseFrame> {
       cameraMirrored: additionalData.cameraMirrored,
       frameNumber: additionalData.frameNumber,
       inferenceDurationMs: additionalData.inferenceDurationMs,
+      thermalState: additionalData.thermalState,
+      poseModelDelegate: additionalData.poseModelDelegate,
+      poseModelVariant: additionalData.poseModelVariant,
     };
 
     return {

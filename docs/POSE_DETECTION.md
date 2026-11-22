@@ -115,11 +115,25 @@ transitions. This smoothing is used by the movement classifier and does not
 mutate the raw pose. The debug skeleton still draws the current native pose,
 which can look slightly less smooth than the classifier input.
 
-The camera target and callback rates are configured to **15 FPS** to keep the
-existing older-device behavior conservative; the camera preview chooses a
-supported mode up to 30 FPS. Change those targets only after measuring on the
-target device. The UI receives native metrics at the native reporting
-interval, not a React update for every pose frame.
+The camera inference and callback caps request **20 FPS**, while the preview
+chooses a supported mode up to 30 FPS. They are caps, not promised output
+rates; the native counters show what the device delivers. Android's
+`expo-mediapipe-pose` 0.4.0 implementation analyzes frames on its worker with
+CameraX `STRATEGY_KEEP_ONLY_LATEST`, so a slow inference does not accumulate a
+stale frame queue. Android currently runs the bundled full model on CPU at a
+fixed 1280×720 analysis resolution. The application requests one person
+instead of two, avoiding unnecessary model work. The package only bundles the
+full task model; its lite/heavy variants require a separate local model asset,
+and the app has no supported inference-resolution prop to lower the native
+capture size. These are remaining native performance limits.
+
+The development-only overlay reports measured analysis input FPS, actual
+inference FPS, native average inference latency, cadence-skipped frames, the
+game RAF rate, and measured MotionController duration. Native
+`skippedInferenceFrames` counts frames skipped by the configured inference
+cadence; CameraX does not expose busy-analyzer frame drops through this package
+metric. The UI receives native metrics at the native reporting interval, not a
+React update for every pose callback.
 
 Diagnostics distinguish:
 
@@ -144,9 +158,9 @@ unmounts when leaving the camera screen. App-state listeners are removed by
 their effects. Camera/model release on device is delegated to the native view's
 unmount lifecycle.
 
-No persistent calibration is implemented yet. Full-body status is computed
-from each current frame; the app does not retain body measurements or camera
-images as calibration data.
+Lean calibration lasts two seconds and keeps a bounded set of measured torso
+angles in memory. It does not retain measurements between sessions or save
+camera images.
 
 ## Physical-device results
 

@@ -6,8 +6,8 @@ export const DEBUG_POSE = __DEV__;
 export const POSE_DETECTION_CONFIG: Readonly<PoseDetectionConfig> = {
   confidenceThreshold: 0.5,
   maxPeople: 1,
-  targetFps: 15,
-  callbackFps: 15,
+  targetFps: 20,
+  callbackFps: 20,
 };
 
 /** Confidence and frame-edge gates used by the child-facing full-body status. */
@@ -18,8 +18,8 @@ export const BODY_VISIBILITY_CONFIG = {
 
 export const MEDIAPIPE_CONFIG = {
   modelVariant: 'full' as const,
-  /** Extra candidates let the adapter keep one nearby person selected consistently. */
-  candidatePeople: 2,
+  /** The native package bundles the full task model; Android executes it on CPU. */
+  candidatePeople: 1,
   minPoseDetectionConfidence: 0.35,
   minPosePresenceConfidence: 0.35,
   minTrackingConfidence: 0.35,

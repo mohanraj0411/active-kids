@@ -1,4 +1,13 @@
 import type { MotionEvent, MotionEventType } from '../../motion/controllerTypes';
+import type { GameplayChallenge } from '../adaptive/ChallengeManager';
+import type { DifficultyLevel } from '../adaptive/DifficultyManager';
+import type { Mission } from '../adaptive/MissionManager';
+import type { PerformanceMetrics } from '../adaptive/PerformanceTracker';
+import type {
+  CompanionSnapshot,
+  SurpriseEvent,
+  WorldReaction,
+} from '../adaptive/WorldReactionManager';
 
 export type PlatformerStatus = 'READY' | 'PLAYING' | 'PAUSED' | 'COMPLETE' | 'GAME_OVER';
 
@@ -8,7 +17,9 @@ export type PlayerState =
   | 'JUMPING'
   | 'FALLING'
   | 'CROUCHING'
-  | 'ATTACKING';
+  | 'ATTACKING'
+  | 'HIT'
+  | 'CELEBRATING';
 
 export interface Rect {
   x: number;
@@ -42,7 +53,11 @@ export interface CollectibleObject {
   value: number;
   kind?: 'STAR' | 'FRUIT';
   collected: boolean;
+  missed?: boolean;
+  bonus?: boolean;
 }
+
+export type EnemyState = 'IDLE' | 'MOVE' | 'HIT' | 'DEFEATED';
 
 export interface EnemyObject {
   type: 'ENEMY';
@@ -52,6 +67,14 @@ export interface EnemyObject {
   width: number;
   height: number;
   defeated: boolean;
+  state?: EnemyState;
+  homeX?: number;
+  patrolRange?: number;
+  patrolSpeed?: number;
+  basePatrolSpeed?: number;
+  patrolDirection?: -1 | 1;
+  idleRemaining?: number;
+  hitAt?: number;
 }
 
 export interface FinishObject {
@@ -76,7 +99,15 @@ export interface PlatformerLevel {
   objects: PlatformerLevelObject[];
 }
 
-export type PlatformerFeedbackType = 'COLLECTIBLE' | 'ENEMY_HIT' | 'LANDING' | 'FINISH';
+export type PlatformerFeedbackType =
+  | 'COLLECTIBLE'
+  | 'ENEMY_HIT'
+  | 'LANDING'
+  | 'FINISH'
+  | 'RESPAWN'
+  | 'COMBO'
+  | 'GATE'
+  | 'MISSION';
 
 export interface PlatformerFeedback {
   id: number;
@@ -109,13 +140,31 @@ export interface PlatformerSnapshot {
   score: number;
   collectibles: number;
   stars: number;
+  hearts: number;
+  combo: number;
+  bestCombo: number;
+  enemiesDefeated: number;
+  respawning: boolean;
+  difficulty: DifficultyLevel;
+  performance: PerformanceMetrics;
+  mission: Mission | null;
+  missionToast: { id: number; title: string; time: number } | null;
+  missionBonusStars: number;
+  missionBonusStarsAvailable: number;
+  challenge: GameplayChallenge | null;
+  worldReaction: WorldReaction | null;
+  companion: CompanionSnapshot;
+  surprise: SurpriseEvent | null;
   elapsedSeconds: number;
   distance: number;
   cameraOffset: number;
   latestMotionEvent: MotionEvent | null;
   feedback: PlatformerFeedback | null;
   player: PlayerSnapshot;
+  /** Stable level definitions; never mutated during a run. */
   level: PlatformerLevel;
+  /** Mutable gameplay entities, reused by reference between render snapshots. */
+  objects: PlatformerLevelObject[];
 }
 
 export type DevMotionEventType = Extract<

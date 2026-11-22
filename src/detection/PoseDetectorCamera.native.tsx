@@ -21,7 +21,7 @@ import {
 } from 'react-native';
 
 import { MediaPipePoseAdapter } from './PoseDetector';
-import { MEDIAPIPE_CONFIG, POSE_DETECTION_CONFIG } from './poseConfig';
+import { DEBUG_POSE, MEDIAPIPE_CONFIG, POSE_DETECTION_CONFIG } from './poseConfig';
 import type {
   CameraReadyInfo,
   PoseDetectorCameraProps,
@@ -86,6 +86,7 @@ export function PoseDetectorCamera({
     code: PoseDetectorErrorCode;
   } | null>(null);
   const isMountedRef = useRef(true);
+  const lastOverlayUpdateAt = useRef(0);
 
   const reportError = useCallback(
     (code: PoseDetectorErrorCode) => {
@@ -127,7 +128,7 @@ export function PoseDetectorCamera({
         } else if (capabilities.status === 'unavailable') {
           reportError('unsupportedDevice');
         } else if (!findCameraMode(capabilities, cameraFacing)) {
-          reportError('cameraUnavailable');
+          reportError('cameraFacingUnavailable');
         }
       })
       .catch(() => {
@@ -168,21 +169,22 @@ export function PoseDetectorCamera({
       try {
         const output = adapter.process(frame);
 
-        const selectedPose = frame.poses?.[output.poseIndex];
-        const selectedLandmarks =
-          selectedPose?.landmarks ??
-          (frame.poses?.length ? [] : frame.landmarks);
-        const selectedWorldLandmarks =
-          selectedPose?.worldLandmarks ??
-          (frame.poses?.length ? [] : frame.worldLandmarks);
-        const nextOverlayFrame: PoseFrame = {
-          landmarks: selectedLandmarks.map(withVisibilityFallback),
-          worldLandmarks: selectedWorldLandmarks,
-          additionalData: frame.additionalData,
-        };
-
         if (isMountedRef.current) {
-          if (previewVisible) {
+          // Setup preview is intentionally capped below the camera callback rate;
+          // gameplay hides this overlay entirely and avoids per-frame React work.
+          const now = Date.now();
+          if (previewVisible && now - lastOverlayUpdateAt.current >= 100) {
+            const selectedPose = frame.poses?.[output.poseIndex];
+            const selectedLandmarks = selectedPose?.landmarks ??
+              (frame.poses?.length ? [] : frame.landmarks);
+            const selectedWorldLandmarks = selectedPose?.worldLandmarks ??
+              (frame.poses?.length ? [] : frame.worldLandmarks);
+            const nextOverlayFrame: PoseFrame = {
+              landmarks: selectedLandmarks.map(withVisibilityFallback),
+              worldLandmarks: selectedWorldLandmarks,
+              additionalData: frame.additionalData,
+            };
+            lastOverlayUpdateAt.current = now;
             setOverlaySnapshot({ sessionKey, cameraFacing, frame: nextOverlayFrame });
           }
           onPose(output.result);
@@ -287,7 +289,7 @@ export function PoseDetectorCamera({
           onCameraConfigured={handleCameraConfigured}
           onInferenceError={handleInferenceError}
           onLandmark={handleLandmark}
-          onPerformanceMetrics={handleMetrics}
+          onPerformanceMetrics={DEBUG_POSE ? handleMetrics : undefined}
         />
       )}
 

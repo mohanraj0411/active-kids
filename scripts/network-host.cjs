@@ -4,11 +4,15 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { WebSocketServer, WebSocket } = require('ws');
+const { Bonjour } = require('bonjour-service');
 
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const DEFAULT_PORT = 8765;
 const HEARTBEAT_TIMEOUT_MS = 4_000;
+const PAIRING_CODE_LIFETIME_MS = 5 * 60_000;
+const RECONNECT_TOKEN_LIFETIME_MS = 60_000;
 const MAX_MESSAGE_BYTES = 8_192;
+const RECEIVER_SERVICE_TYPE = 'activekids';
 const MOTION_BY_EVENT = Object.freeze({
   RUN_START: 'RUN',
   RUN_STOP: 'RUN',
@@ -21,16 +25,47 @@ const MOTION_BY_EVENT = Object.freeze({
 function createNetworkHost(options = {}) {
   const port = options.port ?? DEFAULT_PORT;
   const host = options.host ?? '0.0.0.0';
+  const pairingCodeLifetimeMs = options.pairingCodeLifetimeMs ?? PAIRING_CODE_LIFETIME_MS;
+  const pairingCodeSweepIntervalMs = options.pairingCodeSweepIntervalMs ?? 10_000;
   const staticDirectory = options.staticDirectory === undefined
     ? path.resolve(__dirname, '..', 'dist')
     : options.staticDirectory;
   const log = options.onLog ?? ((message) => process.stdout.write(`${message}\n`));
+  const receiverId = options.receiverId ?? crypto.randomUUID();
+  const receiverName = options.receiverName ?? 'Active Kids TV';
+  let discoveryStatus = options.discoveryStatus ?? 'STARTING';
+  let pairingCode = options.pairingCode ?? createPairingCode();
+  let pairingCodeIssuedAt = Date.now();
   const httpServer = http.createServer((request, response) => {
     if (request.url === '/health') {
-      response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+      response.writeHead(200, {
+        'access-control-allow-origin': '*',
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
       response.end(JSON.stringify({
         status: 'ok',
         protocolVersion: PROTOCOL_VERSION,
+        receiverId,
+        receiverName,
+        discoveryStatus,
+        port: getPort(httpServer, port),
+        addresses: getLanAddresses(),
+      }));
+      return;
+    }
+    if (request.url === '/api/receiver') {
+      response.writeHead(200, {
+        'access-control-allow-origin': '*',
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      response.end(JSON.stringify({
+        receiverId,
+        receiverName,
+        deviceType: 'receiver',
+        protocolVersion: PROTOCOL_VERSION,
+        discoveryStatus,
         port: getPort(httpServer, port),
         addresses: getLanAddresses(),
       }));
@@ -47,7 +82,12 @@ function createNetworkHost(options = {}) {
   let tvHost = null;
   let phoneController = null;
   let sessionId = crypto.randomUUID();
+  let pairedPhoneClientId = null;
+  let activeReconnectToken = null;
+  let reconnectTokenExpiresAt = 0;
   let lastSequence = 0;
+  let lastGameEventSequence = 0;
+  const pairingFailures = new Map();
   let closed = false;
 
   httpServer.on('upgrade', (request, socket, head) => {
@@ -73,6 +113,7 @@ function createNetworkHost(options = {}) {
       socket,
       role: null,
       clientId: null,
+      remoteAddress: request.socket.remoteAddress ?? '',
       lastHeartbeatAt: Date.now(),
       hasWelcomed: false,
     };
@@ -121,6 +162,9 @@ function createNetworkHost(options = {}) {
         case 'INPUT':
           acceptInput(client, message);
           break;
+        case 'GAME_EVENT':
+          acceptGameEvent(client, message);
+          break;
         case 'HEARTBEAT':
           acceptHeartbeat(client, message);
           break;
@@ -155,6 +199,34 @@ function createNetworkHost(options = {}) {
       rejectClient(client, 'TV_HOST_OFFLINE', 'Start the TV host before connecting a phone.');
       return;
     }
+    if (message.role === 'PHONE_CONTROLLER') {
+      const isReconnect = message.clientId === pairedPhoneClientId &&
+        message.reconnectToken === activeReconnectToken &&
+        reconnectTokenExpiresAt > Date.now();
+      if (!isReconnect) {
+        if (typeof message.pairingCode !== 'string' || !/^\d{6}$/.test(message.pairingCode)) {
+          rejectClient(client, 'PAIRING_REQUIRED', 'Enter the six-digit code shown on the receiver.');
+          return;
+        }
+        const key = client.remoteAddress;
+        const attempt = pairingFailures.get(key) ?? { count: 0, lockedUntil: 0 };
+        if (attempt.lockedUntil > Date.now()) {
+          rejectClient(client, 'PAIRING_REJECTED', 'Too many code attempts. Wait a minute and try again.');
+          return;
+        }
+        if (message.pairingCode !== pairingCode) {
+          attempt.count += 1;
+          if (attempt.count >= 6) {
+            attempt.count = 0;
+            attempt.lockedUntil = Date.now() + 60_000;
+          }
+          pairingFailures.set(key, attempt);
+          rejectClient(client, 'PAIRING_REJECTED', 'That code does not match the receiver. Check the TV and try again.');
+          return;
+        }
+        pairingFailures.delete(key);
+      }
+    }
     if (message.role === 'TV_HOST' && isOpen(tvHost?.socket)) {
       rejectClient(client, 'ROLE_BUSY', 'A TV host is already connected.');
       return;
@@ -168,9 +240,20 @@ function createNetworkHost(options = {}) {
     client.clientId = message.clientId;
     client.lastHeartbeatAt = Date.now();
     if (client.role === 'TV_HOST') tvHost = client;
-    else phoneController = client;
+    else {
+      phoneController = client;
+      if (message.reconnectToken !== activeReconnectToken || message.clientId !== pairedPhoneClientId) {
+        pairedPhoneClientId = message.clientId;
+        activeReconnectToken = crypto.randomBytes(24).toString('hex');
+        pairingCode = createPairingCode();
+        pairingCodeIssuedAt = Date.now();
+        log(`[NETWORK] New pairing code: ${pairingCode}`);
+      }
+      reconnectTokenExpiresAt = 0;
+    }
 
     rotateSession();
+    lastGameEventSequence = 0;
     log(`[NETWORK] ${client.role} joined (${client.clientId})`);
     sendWelcome(tvHost);
     if (phoneController) sendWelcome(phoneController);
@@ -190,26 +273,40 @@ function createNetworkHost(options = {}) {
       sendError(client.socket, 'SEQUENCE_REJECTED', 'Input sequence must increase.');
       return;
     }
-    const expectedMotion = MOTION_BY_EVENT[message.event];
-    if (
-      !expectedMotion ||
-      message.motion !== expectedMotion ||
-      !Number.isFinite(message.timestamp) ||
-      !Number.isFinite(message.confidence) ||
-      message.confidence < 0 || message.confidence > 1
-    ) {
-      sendError(client.socket, 'INVALID_MESSAGE', 'INPUT fields are invalid.');
-      return;
-    }
     if (!isOpen(tvHost?.socket)) {
       sendError(client.socket, 'TV_HOST_OFFLINE', 'The TV host disconnected.');
       return;
     }
 
+    if (!isValidInput(message)) {
+      sendError(client.socket, 'INVALID_MESSAGE', 'INPUT fields are invalid.');
+      return;
+    }
     lastSequence = message.sequence;
     const forwarded = { ...message, serverReceivedAt: Date.now() };
     sendJson(tvHost.socket, forwarded);
-    log(`[NETWORK] INPUT ${message.event} seq=${message.sequence}`);
+    log(`[NETWORK] INPUT ${message.action} seq=${message.sequence}`);
+  }
+
+  function acceptGameEvent(client, message) {
+    if (client !== tvHost || client.role !== 'TV_HOST' || !isOpen(phoneController?.socket)) {
+      sendError(client.socket, 'INVALID_MESSAGE', 'Only the receiver can send game events to a paired phone.');
+      return;
+    }
+    if (message.sessionId !== sessionId) {
+      sendError(client.socket, 'SESSION_MISMATCH', 'The event belongs to an old session.');
+      return;
+    }
+    if (!Number.isSafeInteger(message.sequence) || message.sequence <= lastGameEventSequence) {
+      sendError(client.socket, 'SEQUENCE_REJECTED', 'Game event sequence must increase.');
+      return;
+    }
+    if (!isGameEvent(message.event) || !Number.isFinite(message.timestamp)) {
+      sendError(client.socket, 'INVALID_MESSAGE', 'GAME_EVENT fields are invalid.');
+      return;
+    }
+    lastGameEventSequence = message.sequence;
+    sendJson(phoneController.socket, message);
   }
 
   function acceptHeartbeat(client, message) {
@@ -234,6 +331,7 @@ function createNetworkHost(options = {}) {
   function rotateSession() {
     sessionId = crypto.randomUUID();
     lastSequence = 0;
+    lastGameEventSequence = 0;
   }
 
   function sendWelcome(client) {
@@ -246,7 +344,25 @@ function createNetworkHost(options = {}) {
       serverRole: 'TV_HOST',
       clientRole: client.role,
       serverTimestamp: Date.now(),
+      receiverId,
+      receiverName,
+      ...(client.role === 'TV_HOST' ? { pairingCode } : {}),
+      ...(client.role === 'PHONE_CONTROLLER' ? { reconnectToken: activeReconnectToken } : {}),
     });
+  }
+
+  function refreshPairingCode() {
+    if (isOpen(phoneController?.socket)) return;
+    if (reconnectTokenExpiresAt > 0 && reconnectTokenExpiresAt <= Date.now()) {
+      pairedPhoneClientId = null;
+      activeReconnectToken = null;
+      reconnectTokenExpiresAt = 0;
+    }
+    if (Date.now() - pairingCodeIssuedAt < pairingCodeLifetimeMs) return;
+    pairingCode = createPairingCode();
+    pairingCodeIssuedAt = Date.now();
+    if (isOpen(tvHost?.socket)) sendWelcome(tvHost);
+    log(`[NETWORK] Pairing code refreshed: ${pairingCode}`);
   }
 
   function broadcastPeerStatus() {
@@ -268,6 +384,7 @@ function createNetworkHost(options = {}) {
       changed = true;
       log(`[NETWORK] TV_HOST disconnected: ${reason}`);
       if (phoneController) {
+        reconnectTokenExpiresAt = Date.now() + RECONNECT_TOKEN_LIFETIME_MS;
         sendJson(phoneController.socket, {
           type: 'DISCONNECT',
           protocolVersion: PROTOCOL_VERSION,
@@ -281,6 +398,7 @@ function createNetworkHost(options = {}) {
       }
     } else if (client === phoneController) {
       phoneController = null;
+      reconnectTokenExpiresAt = Date.now() + RECONNECT_TOKEN_LIFETIME_MS;
       changed = true;
       log(`[NETWORK] PHONE_CONTROLLER disconnected: ${reason}`);
       if (isOpen(tvHost?.socket)) {
@@ -313,6 +431,8 @@ function createNetworkHost(options = {}) {
     }
   }, 500);
   heartbeatSweep.unref?.();
+  const pairingCodeSweep = setInterval(() => refreshPairingCode(), pairingCodeSweepIntervalMs);
+  pairingCodeSweep.unref?.();
 
   return {
     httpServer,
@@ -336,6 +456,7 @@ function createNetworkHost(options = {}) {
       if (closed) return Promise.resolve();
       closed = true;
       clearInterval(heartbeatSweep);
+      clearInterval(pairingCodeSweep);
       for (const client of [tvHost, phoneController]) {
         if (isOpen(client?.socket)) client.socket.close(1001, 'Host shutting down');
       }
@@ -351,6 +472,12 @@ function createNetworkHost(options = {}) {
     },
     getSessionId() {
       return sessionId;
+    },
+    getReceiverInfo() {
+      return { receiverId, receiverName, pairingCode, discoveryStatus, port: getPort(httpServer, port) };
+    },
+    setDiscoveryStatus(status) {
+      discoveryStatus = status;
     },
   };
 }
@@ -442,6 +569,37 @@ function isRole(value) {
   return value === 'TV_HOST' || value === 'PHONE_CONTROLLER';
 }
 
+function createPairingCode() {
+  return String(crypto.randomInt(100_000, 1_000_000));
+}
+
+function isValidInput(message) {
+  if (!Number.isSafeInteger(message.sequence) || !Number.isFinite(message.timestamp)) return false;
+  if (message.action === 'MOTION_EVENT') {
+    return Boolean(MOTION_BY_EVENT[message.event]) &&
+      message.motion === MOTION_BY_EVENT[message.event] &&
+      Number.isFinite(message.confidence) && message.confidence >= 0 && message.confidence <= 1;
+  }
+  if (message.action === 'MOVE') {
+    return Number.isFinite(message.value) && message.value >= -1 && message.value <= 1;
+  }
+  return ['JUMP', 'ATTACK', 'CROUCH_START', 'CROUCH_END', 'START_GAME', 'PAUSE', 'RESUME', 'RESTART'].includes(message.action) &&
+    message.event === undefined && message.value === undefined &&
+    message.confidence === undefined && message.motion === undefined;
+}
+
+function isGameEvent(value) {
+  return [
+    'GAME_STARTED',
+    'CHECKPOINT_REACHED',
+    'MISSION_COMPLETED',
+    'PLAYER_DIED',
+    'GAME_PAUSED',
+    'GAME_FINISHED',
+    'CONNECTION_WARNING',
+  ].includes(value);
+}
+
 function isLocalRemoteAddress(address = '') {
   let host = address.toLowerCase();
   if (host.startsWith('::ffff:')) host = host.slice(7);
@@ -480,10 +638,47 @@ if (require.main === module) {
   const host = process.env.ACTIVE_KIDS_NETWORK_BIND ?? '0.0.0.0';
   const appDist = process.env.ACTIVE_KIDS_WEB_DIST ?? path.resolve(__dirname, '..', 'dist');
   const staticDirectory = fs.existsSync(path.join(appDist, 'index.html')) ? appDist : null;
-  const networkHost = createNetworkHost({ port, host, staticDirectory });
+  const receiverName = process.env.ACTIVE_KIDS_RECEIVER_NAME?.trim() || 'Active Kids TV';
+  const discoveryEnabled = process.env.ACTIVE_KIDS_DISCOVERY !== '0';
+  const networkHost = createNetworkHost({
+    port,
+    host,
+    staticDirectory,
+    receiverName,
+    discoveryStatus: discoveryEnabled ? 'STARTING' : 'DISABLED',
+  });
+  const discovery = discoveryEnabled
+    ? new Bonjour({}, (error) => {
+      process.stderr.write(`[DISCOVERY] ${error.message}\n`);
+      networkHost.setDiscoveryStatus('ERROR');
+    })
+    : null;
   networkHost.listen().then((address) => {
     const networkAddresses = getLanAddresses();
+    const receiver = networkHost.getReceiverInfo();
+    const service = discovery?.publish({
+      name: receiverName,
+      type: RECEIVER_SERVICE_TYPE,
+      protocol: 'tcp',
+      port: address.port,
+      txt: {
+        id: receiver.receiverId,
+        deviceType: 'receiver',
+        deviceName: receiverName,
+        protocolVersion: String(PROTOCOL_VERSION),
+      },
+    });
+    service?.on('up', () => {
+      networkHost.setDiscoveryStatus('ADVERTISING');
+      process.stdout.write(`[DISCOVERY] _${RECEIVER_SERVICE_TYPE}._tcp advertisement is active\n`);
+    });
+    service?.on('error', (error) => {
+      networkHost.setDiscoveryStatus('ERROR');
+      process.stderr.write(`[DISCOVERY] Advertisement failed: ${error.message}\n`);
+    });
     process.stdout.write(`[NETWORK] TV host listening on port ${address.port}\n`);
+    process.stdout.write(`[NETWORK] Pairing code: ${receiver.pairingCode}\n`);
+    process.stdout.write(`[DISCOVERY] ${discoveryEnabled ? 'Starting' : 'Disabled'} _${RECEIVER_SERVICE_TYPE}._tcp advertisement\n`);
     for (const ip of networkAddresses) {
       process.stdout.write(`[NETWORK] TV app: http://${ip}:${address.port}/tv\n`);
       process.stdout.write(`[NETWORK] Phone WebSocket: ws://${ip}:${address.port}/ws\n`);
@@ -491,14 +686,68 @@ if (require.main === module) {
     if (networkAddresses.length === 0) {
       process.stdout.write(`[NETWORK] Local app: http://localhost:${address.port}/tv\n`);
     }
+    if (process.argv.includes('--open-browser')) {
+      const receiverHost = process.env.ACTIVE_KIDS_RECEIVER_HOST || networkAddresses[0] || '127.0.0.1';
+      const receiverUrl = `http://${receiverHost}:${address.port}/tv`;
+      process.stdout.write(`[RECEIVER] Opening ${receiverUrl}\n`);
+      openReceiverBrowser(receiverUrl);
+    }
   }).catch((error) => {
     process.stderr.write(`[NETWORK] Host failed: ${error.message}\n`);
     process.exitCode = 1;
   });
 
-  const shutdown = () => networkHost.close().finally(() => process.exit());
+  const shutdown = () => {
+    discovery?.destroy();
+    networkHost.close().finally(() => process.exit());
+  };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+}
+
+function openReceiverBrowser(url) {
+  const configuredBrowser = process.env.ACTIVE_KIDS_BROWSER;
+  let command;
+  let args;
+  if (configuredBrowser) {
+    command = configuredBrowser;
+    args = [url];
+  } else if (process.platform === 'win32') {
+    command = 'cmd.exe';
+    args = ['/d', '/s', '/c', `start "" "${url}"`];
+  } else if (process.platform === 'darwin') {
+    command = 'open';
+    args = [url];
+  } else if (process.env.ACTIVE_KIDS_KIOSK === '1') {
+    command = process.env.ACTIVE_KIDS_CHROMIUM || 'chromium';
+    args = ['--kiosk', '--noerrdialogs', '--disable-infobars', url];
+  } else {
+    command = 'xdg-open';
+    args = [url];
+  }
+
+  try {
+    const browser = require('node:child_process').spawn(command, args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    let fallbackPrinted = false;
+    const printFallback = (reason) => {
+      if (fallbackPrinted) return;
+      fallbackPrinted = true;
+      process.stderr.write(`[RECEIVER] Browser could not be opened${reason ? ` (${reason})` : ''}. Open ${url} on this device.\n`);
+    };
+    browser.once('error', (error) => {
+      printFallback(error.message);
+    });
+    browser.once('exit', (code, signal) => {
+      if (code !== 0) printFallback(signal ? `stopped by ${signal}` : `browser command exited with code ${code}`);
+    });
+    browser.unref();
+  } catch (error) {
+    process.stderr.write(`[RECEIVER] Browser could not be opened (${error.message}). Open ${url} on this device.\n`);
+  }
 }
 
 module.exports = { createNetworkHost };

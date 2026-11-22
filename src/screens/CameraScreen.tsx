@@ -41,10 +41,15 @@ import { getMotionHighlights, MotionController } from '../motion';
 import { MOTION_CONFIG } from '../motion/thresholds';
 import type { GestureEvent, GestureType, MotionResult } from '../motion/types';
 import type {
+  BodyLeanState,
   ContinuousMotionState,
+  HorizontalMovement,
   MotionControllerDiagnostics,
   MotionEvent,
 } from '../motion/controllerTypes';
+import { NEUTRAL_HORIZONTAL_MOVEMENT } from '../motion/controllerTypes';
+import { BODY_LEAN_CONFIG } from '../motion/motionThresholds';
+import { MotionProcessingMeter, type MotionProcessingSnapshot } from '../motion/MotionProcessingMeter';
 import { colors, radius, spacing } from '../theme';
 
 type CameraScreenProps = {
@@ -52,8 +57,10 @@ type CameraScreenProps = {
   gameMode?: boolean;
   previewVisible?: boolean;
   motionEnabled?: boolean;
+  autoCalibrate?: boolean;
   onGestureEvent?: (event: GestureEvent) => void;
   onMotionEvent?: (event: MotionEvent) => void;
+  onHorizontalMovement?: (movement: HorizontalMovement) => void;
   onSessionReady?: () => void;
   onSessionSuspended?: () => void;
   onSessionError?: (error: PoseDetectorErrorCode) => void;
@@ -65,14 +72,22 @@ export interface CameraGameOverlayInfo {
   detectorState: PoseDetectionState;
   bodyVisibility: BodyVisibilityAssessment;
   confidence: number | null;
+  cameraInfo: CameraReadyInfo | null;
+  thermalState: PoseResult['thermalState'] | null;
+  poseModelDelegate: PoseResult['poseModelDelegate'] | null;
+  poseModelVariant: PoseResult['poseModelVariant'] | null;
   metrics: PosePerformanceMetrics | null;
   lastEvent: GestureEvent | null;
   motionState: ContinuousMotionState;
   motionDiagnostics: MotionControllerDiagnostics | null;
+  bodyLean: BodyLeanState;
+  motionProcessing: MotionProcessingSnapshot;
   lastMotionEvent: MotionEvent | null;
   errorCode: PoseDetectorErrorCode | null;
   errorMessage: string | null;
   resetMotionController: () => void;
+  beginNeutralCalibration: () => void;
+  completeNeutralCalibration: () => void;
   retryCamera: () => void;
   flipCamera: () => void;
 }
@@ -93,6 +108,9 @@ interface PoseDisplaySummary {
   inferenceDurationMs: number | null;
   landmarkCount: number;
   hasResult: boolean;
+  thermalState: PoseResult['thermalState'] | null;
+  poseModelDelegate: PoseResult['poseModelDelegate'] | null;
+  poseModelVariant: PoseResult['poseModelVariant'] | null;
   bodyVisibility: BodyVisibilityAssessment;
   landmarkScores: PoseLandmarkScores;
 }
@@ -110,15 +128,34 @@ interface PoseLandmarkScores {
 }
 
 const UI_POSE_UPDATE_INTERVAL_MS = 400;
+const DEBUG_METRICS_UPDATE_INTERVAL_MS = 400;
 const EMPTY_BODY_VISIBILITY = assessBodyVisibility(null);
+const EMPTY_MOTION_PROCESSING: MotionProcessingSnapshot = {
+  sampleCount: 0,
+  rateHz: 0,
+  averageMs: 0,
+  maximumMs: 0,
+};
+const NEUTRAL_BODY_LEAN: BodyLeanState = {
+  direction: 0,
+  intensity: 0,
+  angleDegrees: 0,
+  rawAngleDegrees: null,
+  trackingConfidence: 0,
+  isTracking: false,
+  calibrated: false,
+  calibrating: false,
+};
 
 export function CameraScreen({
   onExit,
   gameMode = false,
   previewVisible = true,
   motionEnabled = true,
+  autoCalibrate = false,
   onGestureEvent,
   onMotionEvent,
+  onHorizontalMovement,
   onSessionReady,
   onSessionSuspended,
   onSessionError,
@@ -128,6 +165,7 @@ export function CameraScreen({
   const [permissionRequestPending, setPermissionRequestPending] = useState(false);
   const [permissionRequestFailed, setPermissionRequestFailed] = useState(false);
   const [cameraStatus, setCameraStatus] = useState<CameraPreviewState>('starting');
+  const [cameraInfo, setCameraInfo] = useState<CameraReadyInfo | null>(null);
   const [cameraFacing, setCameraFacing] = useState<CameraFacing>('front');
   const [cameraAttempt, setCameraAttempt] = useState(0);
   const [detectorError, setDetectorError] = useState<PoseDetectorErrorCode | null>(
@@ -141,21 +179,30 @@ export function CameraScreen({
   const [motionResult, setMotionResult] = useState<MotionResult | null>(null);
   const [eventLog, setEventLog] = useState<GestureEvent[]>([]);
   const [lastGestureEvent, setLastGestureEvent] = useState<GestureEvent | null>(null);
+  const motionControllerRef = useRef<MotionController | null>(null);
+  if (motionControllerRef.current === null) {
+    motionControllerRef.current = new MotionController();
+  }
   const [motionDiagnostics, setMotionDiagnostics] = useState<MotionControllerDiagnostics | null>(null);
+  const [bodyLean, setBodyLean] = useState<BodyLeanState>(NEUTRAL_BODY_LEAN);
+  const [motionProcessing, setMotionProcessing] = useState<MotionProcessingSnapshot>(EMPTY_MOTION_PROCESSING);
   const [lastMotionEvent, setLastMotionEvent] = useState<MotionEvent | null>(null);
   const [motionEventLog, setMotionEventLog] = useState<MotionEvent[]>([]);
   const [appIsActive, setAppIsActive] = useState(
     AppState.currentState === 'active',
   );
-  const motionControllerRef = useRef<MotionController | null>(null);
-  if (motionControllerRef.current === null) {
-    motionControllerRef.current = new MotionController();
-  }
   const motionEnabledRef = useRef(motionEnabled);
   const permissionRequestAttempted = useRef(false);
   const lastPoseUiUpdateAt = useRef(0);
   const lastPoseUiState = useRef<PoseDisplaySummary['state']>('looking');
   const lastMotionUiUpdateAt = useRef(0);
+  const lastDebugMetricsUpdateAt = useRef(0);
+  const lastPoseArrivalAt = useRef<number | null>(null);
+  const trackingLossReported = useRef(true);
+  const motionProcessingMeterRef = useRef<MotionProcessingMeter | null>(null);
+  if (motionProcessingMeterRef.current === null) {
+    motionProcessingMeterRef.current = new MotionProcessingMeter();
+  }
   const cameraStartTime = useRef(0);
   const insets = useSafeAreaInsets();
 
@@ -165,16 +212,35 @@ export function CameraScreen({
     setEventLog([]);
     setLastGestureEvent(null);
     setMotionDiagnostics(null);
+    setBodyLean(motionControllerRef.current?.bodyLeanState ?? NEUTRAL_BODY_LEAN);
+    motionProcessingMeterRef.current?.reset();
+    setMotionProcessing({ sampleCount: 0, rateHz: 0, averageMs: 0, maximumMs: 0 });
     setLastMotionEvent(null);
     setMotionEventLog([]);
     lastMotionUiUpdateAt.current = 0;
+    lastPoseArrivalAt.current = null;
+    trackingLossReported.current = true;
+  }, []);
+
+  const beginNeutralCalibration = useCallback(() => {
+    resetMotionController();
+    motionControllerRef.current?.beginNeutralCalibration();
+    setBodyLean(motionControllerRef.current?.bodyLeanState ?? NEUTRAL_BODY_LEAN);
+    lastPoseArrivalAt.current = Date.now();
+    trackingLossReported.current = false;
+  }, [resetMotionController]);
+
+  const completeNeutralCalibration = useCallback(() => {
+    const next = motionControllerRef.current?.completeNeutralCalibration();
+    if (next) setBodyLean(next);
   }, []);
 
   const releaseMotionInputs = useCallback(() => {
     const timestamp = Date.now();
     onMotionEvent?.({ type: 'RUN_STOP', timestamp, confidence: 1, motion: 'RUN' });
     onMotionEvent?.({ type: 'CROUCH_END', timestamp, confidence: 1, motion: 'CROUCH' });
-  }, [onMotionEvent]);
+    onHorizontalMovement?.(NEUTRAL_HORIZONTAL_MOVEMENT);
+  }, [onHorizontalMovement, onMotionEvent]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -186,6 +252,8 @@ export function CameraScreen({
         lastPoseUiState.current = 'looking';
         setPoseSummary(createEmptyPoseDisplaySummary());
         setMetrics(null);
+        lastPoseArrivalAt.current = null;
+        trackingLossReported.current = true;
       }
       setAppIsActive(isActive);
     });
@@ -197,8 +265,35 @@ export function CameraScreen({
 
   useEffect(() => {
     motionEnabledRef.current = motionEnabled;
-    if (!motionEnabled) motionControllerRef.current?.reset();
-  }, [motionEnabled]);
+    if (!motionEnabled) {
+      motionControllerRef.current?.reset();
+      onHorizontalMovement?.(NEUTRAL_HORIZONTAL_MOVEMENT);
+      lastPoseArrivalAt.current = null;
+      trackingLossReported.current = true;
+      setBodyLean(motionControllerRef.current?.bodyLeanState ?? NEUTRAL_BODY_LEAN);
+    }
+  }, [motionEnabled, onHorizontalMovement]);
+
+  useEffect(() => {
+    if (!motionEnabled) return;
+    const watchdog = setInterval(() => {
+      const lastPoseAt = lastPoseArrivalAt.current;
+      if (
+        lastPoseAt === null ||
+        trackingLossReported.current ||
+        Date.now() - lastPoseAt < BODY_LEAN_CONFIG.trackingLossTimeoutMs
+      ) return;
+
+      trackingLossReported.current = true;
+      const timestamp = Date.now();
+      const events = motionControllerRef.current?.expireTracking(timestamp) ?? [];
+      for (const event of events) onMotionEvent?.(event);
+      onHorizontalMovement?.(motionControllerRef.current?.bodyLeanState ?? NEUTRAL_HORIZONTAL_MOVEMENT);
+      setBodyLean(motionControllerRef.current?.bodyLeanState ?? NEUTRAL_BODY_LEAN);
+      setMotionDiagnostics(motionControllerRef.current?.getDebugInfo() ?? null);
+    }, 100);
+    return () => clearInterval(watchdog);
+  }, [motionEnabled, onHorizontalMovement, onMotionEvent]);
 
   useEffect(() => {
     if (permission?.granted) {
@@ -238,8 +333,17 @@ export function CameraScreen({
     permissionState = permission.granted ? 'granted' : 'denied';
   }
 
-  const handleCameraReady = useCallback((_camera: CameraReadyInfo) => {
+  useEffect(() => {
+    if (!gameMode || permissionState !== 'denied') return;
+    releaseMotionInputs();
+    motionControllerRef.current?.reset();
+    motionProcessingMeterRef.current?.reset();
+    onSessionError?.('cameraPermission');
+  }, [gameMode, onSessionError, permissionState, releaseMotionInputs]);
+
+  const handleCameraReady = useCallback((camera: CameraReadyInfo) => {
     setCameraStatus('ready');
+    setCameraInfo(camera);
     setDetectorError(null);
     lastPoseUiUpdateAt.current = 0;
     lastPoseUiState.current = 'looking';
@@ -252,6 +356,7 @@ export function CameraScreen({
     releaseMotionInputs();
     resetMotionController();
     setCameraStatus('unavailable');
+    setCameraInfo(null);
     setDetectorError(error);
     lastPoseUiUpdateAt.current = 0;
     lastPoseUiState.current = 'looking';
@@ -263,6 +368,10 @@ export function CameraScreen({
         console.warn(
           '[CameraScreen] MediaPipe is missing from this app binary. Expo Go cannot load it; rebuild and open the Active Kids development build.',
         );
+      } else if (error === 'cameraFacingUnavailable') {
+        console.warn(
+          '[CameraScreen] The selected camera is not available on this device. Switch cameras and try again.',
+        );
       } else {
         console.error('[CameraScreen] Pose camera failed.', error);
       }
@@ -270,10 +379,24 @@ export function CameraScreen({
   }, [onSessionError, releaseMotionInputs, resetMotionController]);
 
   const handlePose = useCallback((pose: PoseResult) => {
+    lastPoseArrivalAt.current = Date.now();
+    trackingLossReported.current = false;
     const controller = motionControllerRef.current;
     const isMotionEnabled = motionEnabledRef.current;
-    const motionEvents = isMotionEnabled ? controller?.update(pose) ?? [] : [];
-    const nextMotion = isMotionEnabled ? controller?.lastMotionResult : null;
+    const processingStartedAt = DEBUG_POSE ? getHighResolutionNow() : 0;
+    const isCalibrating = controller?.bodyLeanState.calibrating ?? false;
+    let motionEvents: MotionEvent[] = [];
+    if (isMotionEnabled && controller) {
+      if (isCalibrating) controller.updateCalibrationPose(pose);
+      else motionEvents = controller.update(pose);
+    }
+    if (DEBUG_POSE && controller) {
+      motionProcessingMeterRef.current?.record(processingStartedAt, getHighResolutionNow());
+    }
+    if (isMotionEnabled && controller) {
+      onHorizontalMovement?.(controller.bodyLeanState);
+    }
+    const nextMotion = isMotionEnabled && !isCalibrating ? controller?.lastMotionResult : null;
     if (motionEvents.length > 0) {
       for (const event of motionEvents) onMotionEvent?.(event);
       setLastMotionEvent(motionEvents[motionEvents.length - 1]);
@@ -311,7 +434,16 @@ export function CameraScreen({
       }
     }
 
-    const bodyVisibility = assessBodyVisibility(pose);
+    const now = Date.now();
+    if (
+      DEBUG_POSE &&
+      now - lastDebugMetricsUpdateAt.current >= DEBUG_METRICS_UPDATE_INTERVAL_MS
+    ) {
+      lastDebugMetricsUpdateAt.current = now;
+      setBodyLean(controller?.bodyLeanState ?? NEUTRAL_BODY_LEAN);
+      setMotionProcessing(motionProcessingMeterRef.current?.snapshot() ?? EMPTY_MOTION_PROCESSING);
+    }
+
     let state: PoseDisplaySummary['state'] = 'looking';
     if (pose.detected) {
       state =
@@ -320,7 +452,6 @@ export function CameraScreen({
           : 'detected';
     }
 
-    const now = Date.now();
     const stateChanged = state !== lastPoseUiState.current;
     if (
       !stateChanged &&
@@ -329,6 +460,7 @@ export function CameraScreen({
       return;
     }
 
+    const bodyVisibility = assessBodyVisibility(pose);
     lastPoseUiState.current = state;
     lastPoseUiUpdateAt.current = now;
     setPoseSummary({
@@ -341,13 +473,16 @@ export function CameraScreen({
           : null,
       landmarkCount: Object.keys(pose.landmarks).length,
       hasResult: true,
+      thermalState: pose.thermalState ?? null,
+      poseModelDelegate: pose.poseModelDelegate ?? null,
+      poseModelVariant: pose.poseModelVariant ?? null,
       bodyVisibility,
       landmarkScores: getPoseLandmarkScores(pose),
     });
-  }, [onGestureEvent, onMotionEvent]);
+  }, [onGestureEvent, onHorizontalMovement, onMotionEvent]);
 
   const handleMetrics = useCallback((nextMetrics: PosePerformanceMetrics) => {
-    setMetrics(nextMetrics);
+    if (DEBUG_POSE) setMetrics(nextMetrics);
   }, []);
 
   const beginCameraRestart = useCallback(() => {
@@ -359,6 +494,7 @@ export function CameraScreen({
     lastPoseUiState.current = 'looking';
     lastMotionUiUpdateAt.current = 0;
     setCameraStatus('starting');
+    setCameraInfo(null);
     setDetectorError(null);
     setPoseSummary(createEmptyPoseDisplaySummary());
     setMetrics(null);
@@ -366,6 +502,8 @@ export function CameraScreen({
     setEventLog([]);
     setLastGestureEvent(null);
     setMotionEventLog([]);
+    lastPoseArrivalAt.current = null;
+    trackingLossReported.current = true;
   }, [onSessionSuspended, releaseMotionInputs, resetMotionController]);
 
   const retryCamera = useCallback(() => {
@@ -378,7 +516,20 @@ export function CameraScreen({
     setCameraFacing((facing) => (facing === 'front' ? 'back' : 'front'));
   }, [beginCameraRestart]);
 
-  if (permissionState === 'checking') {
+  useEffect(() => {
+    if (!autoCalibrate || cameraStatus !== 'ready') return;
+    let calibrationTimer: ReturnType<typeof setTimeout> | null = null;
+    const startTimer = setTimeout(() => {
+      beginNeutralCalibration();
+      calibrationTimer = setTimeout(completeNeutralCalibration, BODY_LEAN_CONFIG.calibrationDurationMs);
+    }, 0);
+    return () => {
+      clearTimeout(startTimer);
+      if (calibrationTimer) clearTimeout(calibrationTimer);
+    };
+  }, [autoCalibrate, beginNeutralCalibration, cameraStatus, completeNeutralCalibration]);
+
+  if (!gameMode && permissionState === 'checking') {
     return (
       <SafeAreaView style={styles.permissionSafeArea}>
         <StatusBar hidden={gameMode} barStyle="dark-content" />
@@ -394,7 +545,7 @@ export function CameraScreen({
     );
   }
 
-  if (permissionState === 'denied') {
+  if (!gameMode && permissionState === 'denied') {
     const canAskAgain = permission?.canAskAgain ?? false;
 
     return (
@@ -439,26 +590,36 @@ export function CameraScreen({
     );
   }
 
-  const detectorState = getDetectorState(cameraStatus, poseSummary.state);
-  const cameraValue = getCameraStatusValue(cameraStatus, appIsActive);
+  const visibleCameraStatus = gameMode && permissionState === 'denied' ? 'unavailable' : cameraStatus;
+  const visibleCameraInfo = gameMode && permissionState === 'denied' ? null : cameraInfo;
+  const detectorState = getDetectorState(visibleCameraStatus, poseSummary.state);
+  const cameraValue = getCameraStatusValue(visibleCameraStatus, appIsActive);
   const detectorValue = getDetectorStatusValue(detectorState);
-  const cameraTone = getCameraStatusTone(cameraStatus);
+  const cameraTone = getCameraStatusTone(visibleCameraStatus);
   const detectorTone = getDetectorStatusTone(detectorState);
   const motionHighlights = getMotionHighlights(motionResult);
   const errorMessage = detectorError ? getDetectorErrorMessage(detectorError) : null;
   const gameOverlayInfo: CameraGameOverlayInfo = {
-    cameraStatus,
+    cameraStatus: visibleCameraStatus,
     detectorState,
     bodyVisibility: poseSummary.bodyVisibility,
     confidence: poseSummary.hasResult ? poseSummary.confidence : null,
+    cameraInfo: visibleCameraInfo,
+    thermalState: poseSummary.thermalState,
+    poseModelDelegate: poseSummary.poseModelDelegate,
+    poseModelVariant: poseSummary.poseModelVariant,
     metrics,
     lastEvent: lastGestureEvent,
     motionState: motionDiagnostics?.state ?? 'IDLE',
     motionDiagnostics,
+    bodyLean,
+    motionProcessing,
     lastMotionEvent,
     errorCode: detectorError,
     errorMessage,
     resetMotionController,
+    beginNeutralCalibration,
+    completeNeutralCalibration,
     retryCamera,
     flipCamera,
   };
@@ -471,7 +632,9 @@ export function CameraScreen({
     <CameraGameSessionContext.Provider value={gameOverlayInfo}>
       <View style={styles.cameraContainer}>
         <StatusBar hidden={gameMode} barStyle="light-content" />
-        {cameraStatus === 'unavailable' ? (
+        {permissionState !== 'granted' ? (
+          <View style={styles.cameraUnavailable} />
+        ) : visibleCameraStatus === 'unavailable' ? (
           detectorError === 'nativeModuleUnavailable' && previewVisible && permission?.granted ? (
             <CameraView style={StyleSheet.absoluteFill} facing={cameraFacing} />
           ) : (
@@ -509,7 +672,7 @@ export function CameraScreen({
           </Text>
         </View>
 
-        {cameraStatus !== 'unavailable' && (
+        {visibleCameraStatus !== 'unavailable' && (
           <View pointerEvents="none" style={styles.guideRegion}>
             <View style={styles.bodyGuide}>
               <View style={styles.guideHead} />
@@ -541,7 +704,7 @@ export function CameraScreen({
 
           <Text style={styles.bottomText}>
             {errorMessage ??
-              (cameraStatus === 'starting'
+              (visibleCameraStatus === 'starting'
                 ? 'Loading the on-device pose model and starting the camera...'
                 : poseSummary.state === 'looking'
                   ? 'Looking for a person. Keep your whole body in view.'
@@ -550,7 +713,7 @@ export function CameraScreen({
                     : 'Person detected.')}
           </Text>
 
-          {(poseSummary.hasResult || cameraStatus === 'ready') && (
+          {(poseSummary.hasResult || visibleCameraStatus === 'ready') && (
             <Text
               style={[
                 styles.bodyVisibilityText,
@@ -591,11 +754,28 @@ export function CameraScreen({
                 {poseSummary.hasResult ? poseSummary.landmarkCount : '—'}
               </Text>
               <Text style={styles.debugText}>
-                Camera input FPS: {metrics ? metrics.observedFps.toFixed(1) : '—'}
-                {'  '}Pose FPS: {metrics ? metrics.inferenceFps.toFixed(1) : '—'}
-                {'  '}Results FPS: {metrics ? metrics.resultFps.toFixed(1) : '—'}
-                {'  '}Pose inference: {poseSummary.inferenceDurationMs === null ? '—' : poseSummary.inferenceDurationMs.toFixed(0) + ' ms'}
+                Model: {poseSummary.poseModelVariant ?? '—'} / {poseSummary.poseModelDelegate ?? '—'}
+                {'  '}Capture: {cameraInfo ? `${cameraInfo.imageWidth}×${cameraInfo.imageHeight}` : '—'}
+                {'  '}Thermal: {poseSummary.thermalState ?? '—'}
+              </Text>
+              <Text style={styles.debugText}>
+                Camera capture rate: {metrics ? metrics.observedFps.toFixed(1) : 'N/A'} Hz
+                {'  '}Pose inference rate: {metrics ? metrics.inferenceFps.toFixed(1) : 'N/A'} Hz
+                {'  '}Pose result rate: {metrics ? metrics.resultFps.toFixed(1) : 'N/A'} Hz
+                {'  '}Pose latency avg: {metrics?.averageInferenceDurationMs == null ? '—' : metrics.averageInferenceDurationMs.toFixed(0) + ' ms'}
+                {'  '}Last: {poseSummary.inferenceDurationMs === null ? '—' : poseSummary.inferenceDurationMs.toFixed(0) + ' ms'}
                 {'  '}Startup: {startupTimeMs === null ? '—' : startupTimeMs + ' ms'}
+              </Text>
+              <Text style={styles.debugText}>
+                Cadence-skipped frames: {metrics?.skippedInferenceFrames ?? '—'}
+                {'  '}Motion processing: {motionProcessing.rateHz.toFixed(1)} Hz, {motionProcessing.sampleCount ? motionProcessing.averageMs.toFixed(2) : '—'}/{motionProcessing.sampleCount ? motionProcessing.maximumMs.toFixed(2) : '—'} ms avg/max
+              </Text>
+              <Text style={styles.debugText}>
+                Lean: {bodyLean.angleDegrees >= 0 ? '+' : ''}{bodyLean.angleDegrees.toFixed(1)}°
+                {'  '}Direction: {bodyLean.direction < 0 ? 'LEFT' : bodyLean.direction > 0 ? 'RIGHT' : 'CENTER'}
+                {'  '}Intensity: {bodyLean.intensity.toFixed(2)}
+                {'  '}Torso tracking: {Math.round(bodyLean.trackingConfidence * 100)}%
+                {'  '}Calibration: {bodyLean.calibrating ? 'IN PROGRESS' : bodyLean.calibrated ? 'READY' : 'NOT CALIBRATED'}
               </Text>
               <Text style={styles.debugText}>
                 Body: {poseSummary.bodyVisibility.state} · Head {formatCheck(poseSummary.bodyVisibility.checkpoints.head)} · Shoulders {formatCheck(poseSummary.bodyVisibility.checkpoints.shoulders)} · Hips {formatCheck(poseSummary.bodyVisibility.checkpoints.hips)} · Knees {formatCheck(poseSummary.bodyVisibility.checkpoints.knees)} · Feet {formatCheck(poseSummary.bodyVisibility.checkpoints.feet)}
@@ -654,14 +834,21 @@ export function CameraScreen({
           )}
 
           <View style={styles.buttonRow}>
-            {cameraStatus === 'unavailable' ? (
-              <AppButton title="TRY AGAIN" onPress={retryCamera} />
+            {visibleCameraStatus === 'unavailable' ? (
+              detectorError === 'cameraFacingUnavailable' ? (
+                <AppButton
+                  title={cameraFacing === 'front' ? 'TRY BACK CAMERA' : 'TRY FRONT CAMERA'}
+                  onPress={flipCamera}
+                />
+              ) : (
+                <AppButton title="TRY AGAIN" onPress={retryCamera} />
+              )
             ) : (
               <AppButton
                 title="FLIP CAMERA"
                 variant="light"
                 onPress={flipCamera}
-                disabled={cameraStatus === 'starting'}
+                disabled={visibleCameraStatus === 'starting'}
                 style={styles.actionButton}
               />
             )}
@@ -688,6 +875,9 @@ function createEmptyPoseDisplaySummary(): PoseDisplaySummary {
     inferenceDurationMs: null,
     landmarkCount: 0,
     hasResult: false,
+    thermalState: null,
+    poseModelDelegate: null,
+    poseModelVariant: null,
     bodyVisibility: EMPTY_BODY_VISIBILITY,
     landmarkScores: {
       head: null,
@@ -701,6 +891,11 @@ function createEmptyPoseDisplaySummary(): PoseDisplaySummary {
       rightAnkle: null,
     },
   };
+}
+
+function getHighResolutionNow(): number {
+  const clock = globalThis.performance;
+  return clock && typeof clock.now === 'function' ? clock.now() : Date.now();
 }
 
 function getPoseLandmarkScores(pose: PoseResult): PoseLandmarkScores {
@@ -848,6 +1043,8 @@ function getDetectorErrorMessage(error: PoseDetectorErrorCode): string {
       return 'Pose detection is not included in Expo Go. Install and open the Active Kids development build.';
     case 'cameraPermission':
       return 'Camera access is needed. Enable it in device settings and try again.';
+    case 'cameraFacingUnavailable':
+      return 'This device does not have a compatible camera facing this way. Try the other camera.';
     case 'cameraUnavailable':
       return 'The camera could not start. Close other apps using it, then try again.';
     case 'modelInitialization':

@@ -33,9 +33,18 @@ available for the existing Motion Target game.
 const controller = new MotionController();
 const events = controller.update(poseResult);
 const continuousState = controller.state; // IDLE | RUN | CROUCH
+const lean = controller.bodyLeanState; // direction -1/0/1 and intensity 0..1
 const debug = controller.getDebugInfo();
 controller.reset(); // on camera/session reset
 ```
+
+`beginNeutralCalibration()` and `completeNeutralCalibration()` bracket a short
+upright calibration. Lean uses shoulder and hip centers in image-pixel geometry,
+so camera aspect ratio and body scale do not change the measured angle. A
+configurable dead zone, time-based smoothing, and curved response produce
+proportional left/right input. The local platformer consumes this continuous
+input while the legacy `RUN_START`/`RUN_STOP` event contract remains available.
+Jump, arm swing, and crouch still use their existing events.
 
 The event list is `MotionEvent[]`. Each event has a typed event name, timestamp,
 confidence, and associated motion type. The controller does not emit a repeated
@@ -105,9 +114,8 @@ Overall pose confidence and each recognizer's required landmark confidence
 must meet the configured 0.5 floor. Low-confidence input does not create action
 events. Run and jump need hips, knees, and ankles; arm swing needs a shoulder,
 elbow, and wrist on the moving side; crouch uses the squat recognizer's trusted
-geometry. States are held briefly during missing data, then internal state
-returns to idle after a sustained invalid interval. No stop/start gameplay
-event is fabricated from a lost or low-confidence pose.
+geometry. Continuous inputs release after the configurable 350 ms tracking
+timeout. No start event is fabricated from a lost or low-confidence pose.
 
 All distances are body-scale relative. Every velocity uses timestamp deltas;
 there is no fixed-FPS assumption. Invalid, non-increasing, and overlong frame
@@ -129,9 +137,12 @@ controller state/event in its development-only debug panel. The controller's
 `update()` result is a plain event list for future game consumers; no global
 event bus or state-management package is needed.
 
-The debug panel reports continuous state, knee velocities and alternations,
-jump phase and foot rise, wrist velocities, cooldowns, and recent motion
-events. It does not update React state on every pose callback.
+The development diagnostics report continuous state, torso angle, direction,
+intensity, tracking confidence, motion-processing time, camera/pose/game FPS,
+inference latency, and skipped frames. The lean callback updates mutable game
+input; the independent game loop publishes snapshots at its own frame cadence.
+Camera preview skeleton updates are throttled to 10 FPS and hidden during
+gameplay.
 
 ## Deterministic checks
 
@@ -141,13 +152,13 @@ Run the lightweight harness with:
 npm run test:motion
 ```
 
-The script compiles only the framework-free motion source into a temporary
+The script compiles the framework-free motion source into a temporary
 directory, feeds deterministic synthetic normalized frames, and removes the
-temporary output. It checks idle/run/start/stop, continued run, jump one-shot
-and landing, arm-swing cooldown, crouch entry/release, low confidence,
-run-plus-swing/jump combinations, multiple body scales, and irregular 33/67/50/
-100 ms timing. These checks validate controller logic; they do not claim that
-MediaPipe on a physical device recognizes a child's movements accurately.
+temporary output. It covers legacy gesture behavior plus neutral calibration,
+left/right lean, dead zone, proportional intensity, body-scale invariance,
+noise smoothing, tracking loss, and deterministic MotionController timing.
+These checks validate controller logic; they do not claim that MediaPipe on a
+physical device recognizes a child's movements accurately.
 
 ## Physical validation and known limits
 

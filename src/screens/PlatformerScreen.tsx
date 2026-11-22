@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   AppState,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -18,8 +19,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AppButton } from '../components/AppButton';
 import { PlatformerRenderer } from '../game/platformer/PlatformerRenderer';
 import { usePlatformerRuntime } from '../game/platformer/usePlatformerRuntime';
+import type { RuntimePerformanceSnapshot } from '../game/platformer/RuntimePerformanceMeter';
+import { amplifyAssistMovement, canStartGame } from '../game/platformer/inputModes';
+import { PERFORMANCE_TEST_DURATION_MS, PerformanceTestHarness, type PerformanceTestValues } from '../game/platformer/PerformanceTestHarness';
 import type { DevMotionEventType, PlatformerSnapshot } from '../game/platformer/types';
-import type { MotionEvent } from '../motion/controllerTypes';
+import type { HorizontalMovement, MotionEvent } from '../motion/controllerTypes';
+import { NEUTRAL_HORIZONTAL_MOVEMENT } from '../motion/controllerTypes';
+import { BODY_LEAN_CONFIG } from '../motion/motionThresholds';
 import { colors, radius, spacing } from '../theme';
 import { CameraScreen, useCameraGameSession } from './CameraScreen';
 
@@ -29,8 +35,9 @@ const KEEP_AWAKE_TAG = 'active-kids-platformer-gameplay';
 const ORIENTATION_LOCK_LANDSCAPE = 5;
 const ORIENTATION_LOCK_PORTRAIT_UP = 3;
 
-type GamePhase = 'CAMERA_CHECK' | 'GAMEPLAY';
-type InputSource = 'camera' | 'manual';
+type GamePhase = 'MODE_SELECT' | 'CAMERA_CHECK' | 'CALIBRATING' | 'GAMEPLAY';
+type InputMode = 'BODY' | 'TOUCH' | 'ASSIST';
+type InputSource = 'body' | 'touch';
 type PauseReason = 'user' | 'app' | 'camera' | null;
 
 type PlatformerScreenProps = { onHome: () => void };
@@ -131,16 +138,20 @@ function LandscapePlatformerSession({
 }: PlatformerScreenProps & { width: number; height: number }) {
   const insets = useSafeAreaInsets();
   const runtime = usePlatformerRuntime(Math.max(240, width), Math.max(220, height));
-  const { game, input, snapshot, publish, handleMotionEvent, handleDeveloperInput } = runtime;
-  const [phase, setPhase] = useState<GamePhase>('CAMERA_CHECK');
-  const [inputSource, setInputSource] = useState<InputSource>('camera');
+  const { game, input, snapshot, publish, handleMotionEvent, handleHorizontalMovement, handleDeveloperInput } = runtime;
+  const [phase, setPhase] = useState<GamePhase>('MODE_SELECT');
+  const [inputMode, setInputMode] = useState<InputMode>('BODY');
+  const [inputSource, setInputSource] = useState<InputSource>('body');
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [pauseReason, setPauseReason] = useState<PauseReason>(null);
   const cameraInterrupted = useRef(false);
+  const cameraMovementRef = useRef<HorizontalMovement>({ direction: 0, intensity: 0 });
+  const touchMovementRef = useRef<HorizontalMovement | null>(null);
 
   const releaseHeldInputs = useCallback(() => {
-    input.handleDeveloperInput('RUN_STOP');
-    input.handleDeveloperInput('CROUCH_END');
+    cameraMovementRef.current = { direction: 0, intensity: 0 };
+    touchMovementRef.current = null;
+    input.releaseAll();
     publish();
   }, [input, publish]);
 
@@ -154,6 +165,67 @@ function LandscapePlatformerSession({
     cameraInterrupted.current = false;
     setPhase('GAMEPLAY');
     game.start();
+    publish();
+  }, [game, publish]);
+
+  const selectTouchMode = useCallback(() => {
+    releaseHeldInputs();
+    input.selectSource('TOUCH');
+    setInputMode('TOUCH');
+    setInputSource('touch');
+    if (game.currentStatus === 'PAUSED') game.resume();
+    else if (game.currentStatus === 'READY') game.start();
+    setPauseReason(null);
+    setPhase('GAMEPLAY');
+    publish();
+  }, [game, input, publish, releaseHeldInputs]);
+
+  const selectAssistMode = useCallback(() => {
+    releaseHeldInputs();
+    input.selectSource('TOUCH');
+    setInputMode('ASSIST');
+    setInputSource('touch');
+    if (game.currentStatus === 'PAUSED') game.resume();
+    else if (game.currentStatus === 'READY') game.start();
+    setPauseReason(null);
+    setPhase('GAMEPLAY');
+    publish();
+  }, [game, input, publish, releaseHeldInputs]);
+
+  const selectBodyMode = useCallback(() => {
+    releaseHeldInputs();
+    input.selectSource('BODY');
+    setInputMode('BODY');
+    setInputSource('body');
+    if (game.currentStatus === 'COMPLETE' || game.currentStatus === 'GAME_OVER') game.restart();
+    if (game.currentStatus === 'PLAYING') game.pause();
+    setPauseReason('user');
+    setPhase('CAMERA_CHECK');
+  }, [game, input, releaseHeldInputs]);
+
+  const switchToTouchMode = useCallback(() => {
+    releaseHeldInputs();
+    input.selectSource('TOUCH');
+    setInputMode('TOUCH');
+    setInputSource('touch');
+    if (game.currentStatus === 'PAUSED' && pauseReason === 'camera') game.resume();
+    setPauseReason(null);
+    setPhase('GAMEPLAY');
+    publish();
+  }, [game, input, pauseReason, publish, releaseHeldInputs]);
+
+  const beginCameraCalibration = useCallback(() => {
+    setPauseReason(null);
+    cameraInterrupted.current = false;
+    setPhase('CALIBRATING');
+  }, []);
+
+  const completeCameraCalibration = useCallback(() => {
+    setPauseReason(null);
+    cameraInterrupted.current = false;
+    if (game.currentStatus === 'PAUSED') game.resume();
+    else if (game.currentStatus === 'READY') game.start();
+    setPhase('GAMEPLAY');
     publish();
   }, [game, publish]);
 
@@ -182,33 +254,104 @@ function LandscapePlatformerSession({
     publish();
   }, [game, publish]);
 
+  const restartCameraGame = useCallback(() => {
+    setPauseReason(null);
+    cameraInterrupted.current = false;
+    if (game.currentStatus === 'GAME_OVER') game.retryFromCheckpoint();
+    else game.restart();
+    setPhase('CALIBRATING');
+    publish();
+  }, [game, publish]);
+
+  const resumeCameraGame = useCallback(() => {
+    setPauseReason(null);
+    cameraInterrupted.current = false;
+    setPhase('CALIBRATING');
+  }, []);
+
   const handleCameraInterrupted = useCallback(() => {
-    if (game.currentStatus === 'PLAYING') {
+    if (phase === 'CALIBRATING') {
+      setPhase('CAMERA_CHECK');
+      releaseHeldInputs();
+      return;
+    }
+    if (inputMode === 'BODY' && inputSource === 'body' && game.currentStatus === 'PLAYING') {
       cameraInterrupted.current = true;
       pauseGame('camera');
     } else {
       releaseHeldInputs();
     }
-  }, [game, pauseGame, releaseHeldInputs]);
+  }, [game, inputMode, inputSource, pauseGame, phase, releaseHeldInputs]);
 
   const handleCameraReady = useCallback(() => {
     if (!cameraInterrupted.current || game.currentStatus !== 'PAUSED') return;
     cameraInterrupted.current = false;
     setPauseReason(null);
-    game.resume();
-    publish();
-  }, [game, publish]);
+    setPhase('CALIBRATING');
+  }, [game]);
 
   const handleLocalMotionEvent = useCallback((event: MotionEvent) => {
-    if (inputSource !== 'camera' || phase !== 'GAMEPLAY') return;
+    if (inputMode !== 'BODY' || inputSource !== 'body' || phase !== 'GAMEPLAY') return;
+    // Camera travel uses continuous lean; RUN events remain for legacy, touch,
+    // developer, and network consumers.
+    if (event.type === 'RUN_START' || event.type === 'RUN_STOP') return;
     handleMotionEvent(event);
-  }, [handleMotionEvent, inputSource, phase]);
+  }, [handleMotionEvent, inputMode, inputSource, phase]);
+
+  const handleCameraLean = useCallback((movement: HorizontalMovement) => {
+    if (inputSource !== 'body' || phase !== 'GAMEPLAY' || game.currentStatus !== 'PLAYING') {
+      cameraMovementRef.current = { direction: 0, intensity: 0 };
+      handleHorizontalMovement(NEUTRAL_HORIZONTAL_MOVEMENT, 'BODY');
+      return;
+    }
+    const bodyMovement = inputMode === 'ASSIST' ? amplifyAssistMovement(movement) : movement;
+    cameraMovementRef.current = bodyMovement;
+    handleHorizontalMovement(touchMovementRef.current ?? bodyMovement, 'BODY');
+  }, [game, handleHorizontalMovement, inputMode, inputSource, phase]);
+
+  const handleTouchMovement = useCallback((movement: HorizontalMovement | null) => {
+    if (inputSource !== 'touch') {
+      touchMovementRef.current = null;
+      return;
+    }
+    if (phase !== 'GAMEPLAY' || game.currentStatus !== 'PLAYING') {
+      touchMovementRef.current = null;
+      handleHorizontalMovement(NEUTRAL_HORIZONTAL_MOVEMENT, 'TOUCH');
+      return;
+    }
+
+    touchMovementRef.current = movement;
+    handleHorizontalMovement(
+      movement ?? NEUTRAL_HORIZONTAL_MOVEMENT,
+      'TOUCH',
+    );
+  }, [game, handleHorizontalMovement, inputSource, phase]);
+
+  const handleTouchInput = useCallback((type: DevMotionEventType) => {
+    if (inputSource !== 'touch' || phase !== 'GAMEPLAY' || game.currentStatus !== 'PLAYING') return;
+    handleDeveloperInput(type, 'TOUCH');
+  }, [game, handleDeveloperInput, inputSource, phase]);
 
   const changeInputSource = useCallback((source: InputSource) => {
     if (source === inputSource) return;
     releaseHeldInputs();
+    input.selectSource(source === 'body' ? 'BODY' : 'TOUCH');
     setInputSource(source);
-  }, [inputSource, releaseHeldInputs]);
+  }, [input, inputSource, releaseHeldInputs]);
+
+  const changeToBodyMode = useCallback(() => {
+    setInputMode('BODY');
+    changeInputSource('body');
+    if (game.currentStatus === 'PLAYING') game.pause();
+    setPauseReason('user');
+    setPhase('CAMERA_CHECK');
+  }, [changeInputSource, game]);
+
+  const fallbackAssistToTouch = useCallback(() => {
+    releaseHeldInputs();
+    input.selectSource('TOUCH');
+    setInputSource('touch');
+  }, [input, releaseHeldInputs]);
 
   const isActivelyPlaying = phase === 'GAMEPLAY' && snapshot.status === 'PLAYING';
 
@@ -222,16 +365,30 @@ function LandscapePlatformerSession({
   }, [game, pauseGame, phase]);
 
   useEffect(() => () => {
-    input.handleDeveloperInput('RUN_STOP');
-    input.handleDeveloperInput('CROUCH_END');
+    input.releaseAll();
   }, [input]);
 
-  if (inputSource === 'manual') {
+  if (phase === 'MODE_SELECT') {
+    return (
+      <InputModeSelection
+        onBody={selectBodyMode}
+        onTouch={selectTouchMode}
+        onAssist={selectAssistMode}
+        onExit={exitGame}
+        topInset={insets.top}
+        bottomInset={insets.bottom}
+      />
+    );
+  }
+
+  if (inputMode === 'TOUCH') {
     return (
       <ManualDeveloperGame
         onExit={exitGame}
-        onCameraMode={() => changeInputSource('camera')}
+        onCameraMode={changeToBodyMode}
         onInput={handleDeveloperInput}
+        onTouchInput={handleTouchInput}
+        onMovement={handleTouchMovement}
         onStart={startGameplay}
         onPause={() => pauseGame('user')}
         onResume={resumeGame}
@@ -241,7 +398,11 @@ function LandscapePlatformerSession({
         height={Math.max(220, height)}
         topInset={insets.top}
         bottomInset={insets.bottom}
-        gameFps={runtime.gameFps}
+        leftInset={insets.left}
+        rightInset={insets.right}
+        gameFps={runtime.performance.gameRafRateHz}
+        performance={runtime.performance}
+        onRenderTime={runtime.recordReactRender}
       />
     );
   }
@@ -249,24 +410,31 @@ function LandscapePlatformerSession({
   return (
     <CameraScreen
       gameMode
-      previewVisible={phase === 'CAMERA_CHECK'}
-      motionEnabled={isActivelyPlaying}
+      previewVisible={phase !== 'GAMEPLAY'}
+      motionEnabled={phase === 'CALIBRATING' || (isActivelyPlaying && (inputMode === 'BODY' || inputMode === 'ASSIST'))}
+      autoCalibrate={inputMode === 'ASSIST'}
       onExit={exitGame}
       onMotionEvent={handleLocalMotionEvent}
+      onHorizontalMovement={handleCameraLean}
       onSessionReady={handleCameraReady}
-      onSessionSuspended={handleCameraInterrupted}
-      onSessionError={handleCameraInterrupted}
+      onSessionSuspended={inputMode === 'BODY' ? handleCameraInterrupted : fallbackAssistToTouch}
+      onSessionError={inputMode === 'BODY' ? handleCameraInterrupted : fallbackAssistToTouch}
     >
       <CameraPlatformerLayer
         phase={phase}
         pauseReason={pauseReason}
         onExit={exitGame}
-        onStart={startGameplay}
+        onStart={beginCameraCalibration}
+        onCalibrationComplete={completeCameraCalibration}
         onPause={() => pauseGame('user')}
-        onResume={resumeGame}
-        onRestart={restartGame}
-        onDeveloperInput={handleDeveloperInput}
-        onDeveloperMode={() => changeInputSource('manual')}
+        onResume={resumeCameraGame}
+        onRestart={restartCameraGame}
+        onTouchInput={handleTouchInput}
+        onTouchMovement={handleTouchMovement}
+        onTouchInputMode={switchToTouchMode}
+        onSwitchInput={() => changeInputSource(inputSource === 'body' ? 'touch' : 'body')}
+        inputMode={inputMode}
+        inputSource={inputSource}
         showDiagnostics={showDiagnostics}
         onToggleDiagnostics={() => setShowDiagnostics((visible) => !visible)}
         snapshot={snapshot}
@@ -274,7 +442,11 @@ function LandscapePlatformerSession({
         height={Math.max(220, height)}
         topInset={insets.top}
         bottomInset={insets.bottom}
-        gameFps={runtime.gameFps}
+        leftInset={insets.left}
+        rightInset={insets.right}
+        gameFps={runtime.performance.gameRafRateHz}
+        performance={runtime.performance}
+        onRenderTime={runtime.recordReactRender}
       />
       {isActivelyPlaying && <KeepAwakeDuringGameplay />}
     </CameraScreen>
@@ -284,6 +456,59 @@ function LandscapePlatformerSession({
 function KeepAwakeDuringGameplay() {
   useKeepAwake(KEEP_AWAKE_TAG);
   return null;
+}
+
+function InputModeSelection({
+  onBody,
+  onTouch,
+  onAssist,
+  onExit,
+  topInset,
+  bottomInset,
+}: {
+  onBody: () => void;
+  onTouch: () => void;
+  onAssist: () => void;
+  onExit: () => void;
+  topInset: number;
+  bottomInset: number;
+}) {
+  return (
+    <View style={[styles.modeSelectRoot, { paddingTop: Math.max(topInset, 14) + 8, paddingBottom: Math.max(bottomInset, 12) + 8 }]}>
+      <View style={[styles.modeSelectHeader, { top: Math.max(topInset, 14) + 8 }]}>
+        <AppButton title="BACK" variant="light" onPress={onExit} style={styles.smallButton} />
+        <Text style={styles.modeSelectEyebrow}>ACTIVE KIDS</Text>
+        <View style={styles.smallButtonSpacer} />
+      </View>
+      <Text style={styles.modeSelectTitle}>HOW DO YOU WANT TO PLAY?</Text>
+      <View style={styles.modeSelectOptions}>
+        <ModeChoice icon="↔" title="BODY" detail="Move with your body." onPress={onBody} />
+        <ModeChoice icon="●" title="TOUCH" detail="Use the controls on screen." onPress={onTouch} />
+        <ModeChoice icon="＋" title="ASSIST" detail="Small body leans with touch help." onPress={onAssist} />
+      </View>
+      <Text style={styles.modeSelectFootnote}>Touch play never needs camera access. Assist keeps touch controls ready if body input is unavailable.</Text>
+    </View>
+  );
+}
+
+function ModeChoice({ icon, title, detail, onPress }: {
+  icon: string;
+  title: string;
+  detail: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${title}. ${detail}`}
+      onPress={onPress}
+      style={({ pressed }) => [styles.modeChoice, pressed && styles.modeChoicePressed]}
+    >
+      <Text style={styles.modeChoiceIcon}>{icon}</Text>
+      <Text style={styles.modeChoiceTitle}>{title}</Text>
+      <Text style={styles.modeChoiceDetail}>{detail}</Text>
+    </Pressable>
+  );
 }
 
 function BodySilhouette({ ready }: { ready: boolean }) {
@@ -323,11 +548,22 @@ function ResultStat({ label, value }: { label: string; value: string }) {
 }
 
 function getGameplayHint(state: PlatformerSnapshot, viewportWidth: number) {
-  if (state.elapsedSeconds < 3.5) {
-    return { title: 'RUN!', detail: 'Move your body to get going.' };
+  if (state.respawning) {
+    return { title: 'BACK IN A MOMENT!', detail: 'Your stars are safe. Meet you at the checkpoint.' };
+  }
+  if (state.player.x - state.level.startX < viewportWidth * 0.35 && state.elapsedSeconds < 5) {
+    return { title: 'LEAN RIGHT!', detail: 'Lean your body or move the left joystick.' };
   }
   if (state.player.crouching) {
     return { title: 'NICE CROUCH!', detail: 'Keep moving when you are ready.' };
+  }
+
+  const challengeDistance = state.challenge
+    ? state.challenge.targetX - state.player.x - state.player.width
+    : Number.POSITIVE_INFINITY;
+  const challengeLead = state.difficulty === 'EASY' ? 1.25 : state.difficulty === 'CHALLENGE' ? 0.92 : 1;
+  if (state.challenge && challengeDistance < viewportWidth * challengeLead && challengeDistance > -viewportWidth * 0.25) {
+    return { title: state.challenge.title, detail: state.challenge.prompt };
   }
 
   const playerRight = state.player.x + state.player.width;
@@ -362,9 +598,61 @@ function getGameplayHint(state: PlatformerSnapshot, viewportWidth: number) {
   if (nextCollectibleDistance < viewportWidth * 0.8) {
     return { title: 'COLLECT!', detail: 'Run through the stars and fruit.' };
   }
+  const recentFeedback = state.feedback && state.elapsedSeconds - state.feedback.time < 1.2
+    ? state.feedback
+    : null;
+  if (recentFeedback?.type === 'GATE') {
+    return { title: 'CROUCH TO PASS!', detail: 'Duck under the leafy arch.' };
+  }
+  if (recentFeedback?.type === 'MISSION') {
+    return { title: 'MISSION COMPLETE!', detail: 'A bonus star is yours!' };
+  }
+  if (recentFeedback && (recentFeedback.type === 'COLLECTIBLE' || recentFeedback.type === 'ENEMY_HIT' || recentFeedback.type === 'LANDING' || recentFeedback.type === 'COMBO')) {
+    return {
+      title: state.combo > 1 ? `COMBO x${state.combo}!` : 'GREAT!',
+      detail: state.combo > 1 ? 'Keep the good moves going.' : 'You did it. Keep exploring!',
+    };
+  }
   return state.player.running
     ? { title: 'GREAT RUN!', detail: 'Keep going. Your next surprise is ahead.' }
-    : { title: 'MOVE TO RUN!', detail: 'Move your body to guide your explorer.' };
+    : { title: 'MOVE TO RUN!', detail: 'Use the left joystick or lean to guide your explorer.' };
+}
+
+function MissionHud({
+  mission,
+  toast,
+  elapsedSeconds,
+  top,
+  left,
+}: {
+  mission: PlatformerSnapshot['mission'];
+  toast: PlatformerSnapshot['missionToast'];
+  elapsedSeconds: number;
+  top: number;
+  left: number;
+}) {
+  const showToast = toast != null && elapsedSeconds - toast.time < 1.8;
+  if (!mission && !showToast) return null;
+  const progress = mission ? Math.min(1, mission.progress / mission.target) : 1;
+  return (
+    <View pointerEvents="none" style={[styles.missionHud, { top, left }]} accessibilityLiveRegion="polite">
+      <Text style={styles.missionHudEyebrow}>{showToast ? 'MISSION COMPLETE!' : 'MISSION'}</Text>
+      <Text style={styles.missionHudTitle} numberOfLines={1}>
+        {showToast ? toast.title : mission?.title}
+      </Text>
+      <Text style={styles.missionHudDescription} numberOfLines={1}>
+        {showToast ? 'BONUS STAR +25 POINTS' : mission?.description}
+      </Text>
+      {!showToast && mission && (
+        <View style={styles.missionProgressRow}>
+          <View style={styles.missionProgressTrack}>
+            <View style={[styles.missionProgressFill, { width: `${progress * 100}%` }]} />
+          </View>
+          <Text style={styles.missionProgressText}>{mission.progress}/{mission.target}</Text>
+        </View>
+      )}
+    </View>
+  );
 }
 
 function formatDuration(seconds: number): string {
@@ -378,11 +666,16 @@ function CameraPlatformerLayer({
   pauseReason,
   onExit,
   onStart,
+  onCalibrationComplete,
   onPause,
   onResume,
   onRestart,
-  onDeveloperInput,
-  onDeveloperMode,
+  onTouchInput,
+  onTouchMovement,
+  onTouchInputMode,
+  onSwitchInput,
+  inputMode,
+  inputSource,
   showDiagnostics,
   onToggleDiagnostics,
   snapshot,
@@ -390,17 +683,26 @@ function CameraPlatformerLayer({
   height,
   topInset,
   bottomInset,
+  leftInset,
+  rightInset,
   gameFps,
+  performance,
+  onRenderTime,
 }: {
   phase: GamePhase;
   pauseReason: PauseReason;
   onExit: () => void;
   onStart: () => void;
+  onCalibrationComplete: () => void;
   onPause: () => void;
   onResume: () => void;
   onRestart: () => void;
-  onDeveloperInput: (type: DevMotionEventType) => void;
-  onDeveloperMode: () => void;
+  onTouchInput: (type: DevMotionEventType) => void;
+  onTouchMovement: (movement: HorizontalMovement | null) => void;
+  onTouchInputMode: () => void;
+  onSwitchInput: () => void;
+  inputMode: InputMode;
+  inputSource: InputSource;
   showDiagnostics: boolean;
   onToggleDiagnostics: () => void;
   snapshot: PlatformerSnapshot;
@@ -408,22 +710,63 @@ function CameraPlatformerLayer({
   height: number;
   topInset: number;
   bottomInset: number;
+  leftInset: number;
+  rightInset: number;
   gameFps: number;
+  performance: RuntimePerformanceSnapshot;
+  onRenderTime: (durationMs: number) => void;
 }) {
   const camera = useCameraGameSession();
-  const canStart = camera.cameraStatus === 'ready' && camera.bodyVisibility.state === 'FULL_BODY';
+  const beginNeutralCalibration = camera.beginNeutralCalibration;
+  const completeNeutralCalibration = camera.completeNeutralCalibration;
+  const bodyLeanIsCalibrating = camera.bodyLean.calibrating;
+  const canStart = canStartGame(
+    inputMode,
+    camera.cameraStatus === 'ready',
+    camera.bodyVisibility.state === 'FULL_BODY',
+  );
   const isChecking = phase === 'CAMERA_CHECK';
+  const [calibrationCountdown, setCalibrationCountdown] = useState(
+    Math.ceil(BODY_LEAN_CONFIG.calibrationDurationMs / 1_000),
+  );
   const isLandscape = width >= height;
   const canShowLivePreview = camera.cameraStatus === 'ready' || camera.errorCode === 'nativeModuleUnavailable';
   const totalStars = snapshot.level.objects.reduce(
     (total, object) => total + (object.type === 'COLLECTIBLE' && object.kind !== 'FRUIT' ? 1 : 0),
-    0,
+    snapshot.missionBonusStarsAvailable,
   );
   const gameplayHint = getGameplayHint(snapshot, width);
   const trackingState = camera.bodyVisibility.state;
-  const shouldShowTrackingHint = phase === 'GAMEPLAY' && snapshot.status === 'PLAYING' && trackingState !== 'FULL_BODY';
+  const shouldShowTrackingHint = inputMode === 'BODY' && phase === 'GAMEPLAY' && snapshot.status === 'PLAYING' && trackingState !== 'FULL_BODY';
   const [trackingHintVisible, setTrackingHintVisible] = useState(false);
   const [celebrationPulse] = useState(() => new Animated.Value(0));
+
+  useEffect(() => {
+    if (phase !== 'CALIBRATING') return;
+    if (!bodyLeanIsCalibrating) beginNeutralCalibration();
+    const startedAt = Date.now();
+    const resetCountdown = setTimeout(
+      () => setCalibrationCountdown(Math.ceil(BODY_LEAN_CONFIG.calibrationDurationMs / 1_000)),
+      0,
+    );
+    const updateCountdown = () => {
+      const remaining = Math.max(
+        0,
+        Math.ceil((BODY_LEAN_CONFIG.calibrationDurationMs - (Date.now() - startedAt)) / 1_000),
+      );
+      setCalibrationCountdown((current) => current === remaining ? current : remaining);
+    };
+    const interval = setInterval(updateCountdown, 150);
+    const timeout = setTimeout(() => {
+      completeNeutralCalibration();
+      onCalibrationComplete();
+    }, BODY_LEAN_CONFIG.calibrationDurationMs);
+    return () => {
+      clearTimeout(resetCountdown);
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, [beginNeutralCalibration, bodyLeanIsCalibrating, completeNeutralCalibration, onCalibrationComplete, phase]);
 
   useEffect(() => {
     const timer = setTimeout(
@@ -453,26 +796,29 @@ function CameraPlatformerLayer({
 
   const startWhenReady = useCallback(() => {
     if (!canStart) return;
-    camera.resetMotionController();
+    setCalibrationCountdown(Math.ceil(BODY_LEAN_CONFIG.calibrationDurationMs / 1_000));
+    beginNeutralCalibration();
     onStart();
-  }, [camera, canStart, onStart]);
+  }, [beginNeutralCalibration, canStart, onStart]);
 
   const resumeSafely = useCallback(() => {
-    camera.resetMotionController();
+    setCalibrationCountdown(Math.ceil(BODY_LEAN_CONFIG.calibrationDurationMs / 1_000));
+    beginNeutralCalibration();
     onResume();
-  }, [camera, onResume]);
+  }, [beginNeutralCalibration, onResume]);
 
   const restartSafely = useCallback(() => {
-    camera.resetMotionController();
+    setCalibrationCountdown(Math.ceil(BODY_LEAN_CONFIG.calibrationDurationMs / 1_000));
+    beginNeutralCalibration();
     onRestart();
-  }, [camera, onRestart]);
+  }, [beginNeutralCalibration, onRestart]);
 
   return (
     <View style={styles.gameRoot}>
       <StatusBar hidden />
       {phase === 'GAMEPLAY' && (
         <View style={StyleSheet.absoluteFill}>
-          <PlatformerRenderer state={snapshot} width={width} height={height} />
+          <PlatformerRenderer state={snapshot} width={width} height={height} onRenderTime={onRenderTime} />
         </View>
       )}
 
@@ -489,9 +835,7 @@ function CameraPlatformerLayer({
             <View style={styles.setupTopRow}>
               <AppButton title="BACK" variant="light" onPress={onExit} style={styles.smallButton} />
               <Text style={styles.setupStep}>CAMERA CHECK</Text>
-              {DEBUG_PLATFORMER ? (
-                <AppButton title="DEV INPUT" variant="light" onPress={onDeveloperMode} style={styles.devModeButton} />
-              ) : <View style={styles.smallButtonSpacer} />}
+              <View style={styles.smallButtonSpacer} />
             </View>
 
             <ScrollView
@@ -505,6 +849,7 @@ function CameraPlatformerLayer({
               <Text style={styles.setupIntro}>
                 Stand a few feet back. Keep your whole body in view.
               </Text>
+              <Text style={styles.setupIntro}>Make some clear space. Stay away from sharp objects. Ask an adult if needed.</Text>
 
               <View style={styles.cameraCheckRow}>
                 <BodySilhouette ready={canStart} />
@@ -546,11 +891,12 @@ function CameraPlatformerLayer({
               <View style={styles.tutorialCard}>
                 <Text style={styles.mirrorTitle}>QUICK START</Text>
                 <View style={styles.tutorialControls}>
-                  <TutorialCue icon="↗" title="RUN" detail="Move" />
+                  <TutorialCue icon="↔" title="LEAN" detail="Lean left or right" />
                   <TutorialCue icon="↑" title="JUMP" detail="Jump" />
                   <TutorialCue icon="↻" title="SWING" detail="Swing an arm" />
                   <TutorialCue icon="↓" title="CROUCH" detail="Duck down" />
                 </View>
+                <Text style={styles.touchControlHint}>During play, move with the left joystick and use the separate buttons on the right.</Text>
               </View>
 
               <View style={styles.safetyNote}>
@@ -566,17 +912,15 @@ function CameraPlatformerLayer({
               </View>
 
               {camera.cameraStatus === 'unavailable' ? (
-                <AppButton
-                  title={camera.errorCode === 'nativeModuleUnavailable' ? 'RETRY POSE DETECTION' : 'TRY CAMERA AGAIN'}
-                  onPress={camera.retryCamera}
-                />
+                <>
+                  <AppButton title={camera.errorCode === 'nativeModuleUnavailable' ? 'RETRY POSE DETECTION' : 'TRY CAMERA AGAIN'} onPress={camera.retryCamera} />
+                  <AppButton title="USE TOUCH MODE" variant="secondary" onPress={onTouchInputMode} />
+                </>
               ) : (
-                <AppButton
-                  title="START GAME"
-                  accessibilityLabel="Start local game"
-                  onPress={startWhenReady}
-                  disabled={!canStart}
-                />
+                <>
+                  <AppButton title="START GAME" accessibilityLabel="Start local game" onPress={startWhenReady} disabled={!canStart} />
+                  <AppButton title="USE TOUCH MODE" variant="secondary" onPress={onTouchInputMode} />
+                </>
               )}
               <Text style={styles.privacyText}>Pose detection runs on this phone. Camera video is not sent to the TV.</Text>
             </View>
@@ -594,14 +938,41 @@ function CameraPlatformerLayer({
             </View>
           )}
         </View>
+      ) : phase === 'CALIBRATING' ? (
+        <View style={styles.calibrationShade}>
+          <View style={styles.calibrationCard}>
+            <Text style={styles.eyebrow}>GET READY</Text>
+            <Text style={styles.calibrationTitle}>Stand normally</Text>
+            <Text style={styles.calibrationDescription}>
+              Keep your whole body in view while we find your center.
+            </Text>
+            <Text style={styles.calibrationCountdown}>
+              {calibrationCountdown > 0 ? calibrationCountdown : 'GO!'}
+            </Text>
+          </View>
+        </View>
       ) : (
         <>
           <View style={[styles.gameHud, { paddingTop: Math.max(topInset, 12) + 4, paddingHorizontal: Math.max(20, width * 0.025) }]}>
             <View style={styles.hudStats}>
               <HudStat label="SCORE" value={String(snapshot.score)} />
               <HudStat label="STARS" value={`${snapshot.stars} / ${totalStars}`} />
+              <HudStat
+                label="HEARTS"
+                value={`${'♥'.repeat(snapshot.hearts)}${'♡'.repeat(Math.max(0, 3 - snapshot.hearts))}`}
+              />
+              {snapshot.combo > 1 && <HudStat label="COMBO" value={`×${snapshot.combo}`} />}
             </View>
             <View style={styles.gameActions}>
+              <Text style={styles.inputModeBadge}>
+                {inputMode === 'ASSIST' ? `BODY ASSIST · ${inputSource === 'body' ? 'BODY ACTIVE' : 'TOUCH ACTIVE'}` : inputSource === 'body' ? 'BODY MODE ACTIVE' : 'TOUCH INPUT ACTIVE'}
+              </Text>
+              <AppButton
+                title={inputSource === 'body' ? 'TOUCH INPUT' : 'BODY INPUT'}
+                variant="light"
+                onPress={onSwitchInput}
+                style={styles.debugButton}
+              />
               {DEBUG_PLATFORMER && <AppButton title={showDiagnostics ? 'DEBUG ON' : 'DEBUG'} variant="light" onPress={onToggleDiagnostics} style={styles.debugButton} />}
               <AppButton
                 title={snapshot.status === 'PLAYING' ? 'PAUSE' : 'EXIT'}
@@ -619,6 +990,16 @@ function CameraPlatformerLayer({
             </View>
           )}
 
+          {snapshot.status === 'PLAYING' && (
+            <MissionHud
+              mission={snapshot.mission}
+              toast={snapshot.missionToast}
+              elapsedSeconds={snapshot.elapsedSeconds}
+              top={Math.max(topInset, 12) + 66}
+              left={Math.max(leftInset, 14) + 4}
+            />
+          )}
+
           {trackingHintVisible && shouldShowTrackingHint && (
             <View style={styles.trackingHint} accessibilityLiveRegion="polite">
               <Text style={styles.trackingHintTitle}>CAN&apos;T SEE YOU</Text>
@@ -628,16 +1009,56 @@ function CameraPlatformerLayer({
 
           {DEBUG_PLATFORMER && showDiagnostics && (
             <View style={[styles.diagnostics, { bottom: Math.max(bottomInset, 8) + 6 }]} pointerEvents="none">
+              <Text style={styles.diagnosticText}>CAMERA CAPTURE {camera.metrics?.observedFps.toFixed(1) ?? 'N/A'} Hz · POSE INFERENCE {camera.metrics?.inferenceFps.toFixed(1) ?? 'N/A'} Hz</Text>
+              <Text style={styles.diagnosticText}>MOTION {camera.motionProcessing.rateHz.toFixed(1)} Hz · {camera.motionProcessing.averageMs.toFixed(2)} ms avg · {camera.motionProcessing.maximumMs.toFixed(2)} ms max</Text>
+              <Text style={styles.diagnosticText}>SIMULATION {performance.simulationRateHz.toFixed(1)} Hz · {performance.simulationAverageMs.toFixed(2)}/{performance.simulationMaximumMs.toFixed(2)} ms avg/max</Text>
+              <Text style={styles.diagnosticText}>GAME RAF {gameFps.toFixed(1)} Hz · RENDER LOOP {performance.renderLoopRateHz.toFixed(1)} Hz · REACT COMMIT {performance.reactCommitRateHz.toFixed(1)} Hz</Text>
+              <Text style={styles.diagnosticText}>REACT RENDER {performance.reactRenderAverageMs.toFixed(2)}/{performance.reactRenderMaximumMs.toFixed(2)} ms avg/max · CAMERA→POSE N/A · POSE→GAME N/A</Text>
               <Text style={styles.diagnosticText}>
-                GAME {gameFps} FPS  ·  CAMERA {camera.metrics?.observedFps.toFixed(0) ?? '—'} FPS  ·  POSE {camera.metrics?.inferenceFps.toFixed(0) ?? '—'} FPS
+                LEAN {camera.bodyLean.angleDegrees >= 0 ? '+' : ''}{camera.bodyLean.angleDegrees.toFixed(1)}°  ·  {camera.bodyLean.direction < 0 ? 'LEFT' : camera.bodyLean.direction > 0 ? 'RIGHT' : 'CENTER'} {Math.round(camera.bodyLean.intensity * 100)}%  ·  TORSO {Math.round(camera.bodyLean.trackingConfidence * 100)}%
               </Text>
               <Text style={styles.diagnosticText}>
-                MOTION {camera.motionState}  ·  CONFIDENCE {camera.confidence === null ? '—' : `${Math.round(camera.confidence * 100)}%`}
+                INFERENCE {camera.metrics?.averageInferenceDurationMs == null ? '—' : `${camera.metrics.averageInferenceDurationMs.toFixed(0)} ms`}  ·  MOTION {camera.motionProcessing.sampleCount ? `${camera.motionProcessing.averageMs.toFixed(2)} ms avg` : '—'}  ·  CADENCE SKIPS {camera.metrics?.skippedInferenceFrames ?? '—'}
+              </Text>
+              <Text style={styles.diagnosticText}>
+                MODEL {camera.poseModelVariant ?? '—'} / {camera.poseModelDelegate ?? '—'} · {camera.cameraInfo ? `${camera.cameraInfo.imageWidth}×${camera.cameraInfo.imageHeight}` : 'N/A'} · THERMAL {camera.thermalState ?? 'N/A'} · CPU N/A · MEMORY N/A · NETWORK N/A
+              </Text>
+              <Text style={styles.diagnosticText}>
+                CALIBRATION {camera.bodyLean.calibrating ? 'IN PROGRESS' : camera.bodyLean.calibrated ? 'READY' : 'NOT RECORDED'}  ·  ACTIONS {camera.motionState}
+              </Text>
+              <Text style={styles.diagnosticText}>
+                ADAPT {snapshot.difficulty} · SCORE {Math.round(snapshot.performance.performanceScore)} · COMBO ×{snapshot.combo} · MISSION {snapshot.mission ? `${snapshot.mission.progress}/${snapshot.mission.target}` : 'DONE'}
               </Text>
             </View>
           )}
 
-          {(snapshot.status === 'PAUSED' || snapshot.status === 'COMPLETE' || snapshot.status === 'GAME_OVER' || camera.cameraStatus === 'unavailable') && (
+          {DEBUG_PLATFORMER && (
+            <PerformanceTestControl
+              inputMode={inputMode}
+              width={width}
+              height={height}
+              cameraState={camera.cameraStatus}
+              performance={performance}
+              captureRateHz={camera.metrics?.observedFps ?? null}
+              poseRateHz={camera.metrics?.inferenceFps ?? null}
+              motionRateHz={camera.motionProcessing.rateHz}
+              skippedPoseFrames={camera.metrics?.skippedInferenceFrames ?? null}
+              thermalState={camera.thermalState ?? null}
+              enabled={snapshot.status === 'PLAYING'}
+            />
+          )}
+
+          {snapshot.status === 'PLAYING' && (
+            <GameTouchControls
+              onMovementChange={onTouchMovement}
+              onInput={onTouchInput}
+              leftInset={leftInset}
+              rightInset={rightInset}
+              bottomInset={bottomInset}
+            />
+          )}
+
+          {(snapshot.status === 'PAUSED' || snapshot.status === 'COMPLETE' || snapshot.status === 'GAME_OVER' || (inputMode === 'BODY' && camera.cameraStatus === 'unavailable')) && (
             <View style={styles.gameModalShade}>
               <View style={styles.gameModal}>
                 <Text style={styles.eyebrow}>
@@ -663,7 +1084,7 @@ function CameraPlatformerLayer({
                   {camera.cameraStatus === 'unavailable'
                     ? camera.errorMessage ?? 'The camera stopped. Retry when you are ready.'
                     : snapshot.status === 'COMPLETE'
-                      ? 'You ran, jumped, collected treats, and helped a friend.'
+                      ? 'You ran, jumped, collected stars, and helped your spider friends.'
                       : snapshot.status === 'GAME_OVER'
                         ? 'Your stars are safe. Let&apos;s try again from a nearby checkpoint.'
                         : pauseReason === 'app'
@@ -676,18 +1097,28 @@ function CameraPlatformerLayer({
                   <View style={styles.resultGrid}>
                     <ResultStat label="SCORE" value={String(snapshot.score)} />
                     <ResultStat label="STARS" value={`${snapshot.stars} / ${totalStars}`} />
+                    <ResultStat label="FRIENDS HELPED" value={String(snapshot.enemiesDefeated)} />
+                    <ResultStat label="BEST COMBO" value={`×${snapshot.bestCombo}`} />
                     <ResultStat label="DISTANCE" value={`${Math.floor(snapshot.distance)} m`} />
                     <ResultStat label="TIME" value={formatDuration(snapshot.elapsedSeconds)} />
                   </View>
                 )}
                 {camera.cameraStatus === 'unavailable' ? (
-                  <AppButton title="TRY CAMERA AGAIN" onPress={camera.retryCamera} />
+                  camera.errorCode === 'cameraFacingUnavailable' ? (
+                    <AppButton title="TRY OTHER CAMERA" onPress={camera.flipCamera} />
+                  ) : (
+                    <AppButton title="TRY CAMERA AGAIN" onPress={camera.retryCamera} />
+                  )
                 ) : snapshot.status === 'COMPLETE' || snapshot.status === 'GAME_OVER' ? (
                   <AppButton title={snapshot.status === 'GAME_OVER' ? 'TRY AGAIN' : 'PLAY AGAIN'} onPress={restartSafely} />
                 ) : snapshot.status === 'PAUSED' && pauseReason !== 'camera' ? (
                   <AppButton title="RESUME" onPress={resumeSafely} />
                 ) : null}
-                <AppButton title="EXIT GAME" variant="secondary" onPress={onExit} />
+                <AppButton
+                  title={snapshot.status === 'COMPLETE' ? 'CONTINUE' : 'EXIT GAME'}
+                  variant="secondary"
+                  onPress={onExit}
+                />
               </View>
             </View>
           )}
@@ -701,6 +1132,8 @@ function ManualDeveloperGame({
   onExit,
   onCameraMode,
   onInput,
+  onTouchInput,
+  onMovement,
   onStart,
   onPause,
   onResume,
@@ -710,11 +1143,17 @@ function ManualDeveloperGame({
   height,
   topInset,
   bottomInset,
+  leftInset,
+  rightInset,
   gameFps,
+  performance,
+  onRenderTime,
 }: {
   onExit: () => void;
   onCameraMode: () => void;
   onInput: (type: DevMotionEventType) => void;
+  onTouchInput: (type: DevMotionEventType) => void;
+  onMovement: (movement: HorizontalMovement | null) => void;
   onStart: () => void;
   onPause: () => void;
   onResume: () => void;
@@ -724,7 +1163,11 @@ function ManualDeveloperGame({
   height: number;
   topInset: number;
   bottomInset: number;
+  leftInset: number;
+  rightInset: number;
   gameFps: number;
+  performance: RuntimePerformanceSnapshot;
+  onRenderTime: (durationMs: number) => void;
 }) {
   const insets = useSafeAreaInsets();
   useEffect(() => {
@@ -764,32 +1207,50 @@ function ManualDeveloperGame({
       <View style={[styles.manualHeader, { paddingTop: Math.max(topInset, 8) + 4 }]}>
         <AppButton title="BACK" variant="light" onPress={onExit} style={styles.hudButton} />
         <View style={styles.manualTitleBox}>
-          <Text style={styles.manualTitle}>DEVELOPER INPUT</Text>
-          <Text style={styles.manualSubtitle}>Touch controls{Platform.OS === 'web' ? ' and keyboard' : ''}</Text>
+          <Text style={styles.manualTitle}>TOUCH MODE</Text>
+          <Text style={styles.manualSubtitle}>Camera-free play{Platform.OS === 'web' ? ' · keyboard available' : ''}</Text>
         </View>
-        <AppButton title="CAMERA MODE" variant="light" onPress={onCameraMode} style={styles.cameraModeButton} />
+        <AppButton title="BODY MODE" variant="light" onPress={onCameraMode} style={styles.cameraModeButton} />
       </View>
       <View style={styles.manualWorld}>
-        <PlatformerRenderer state={snapshot} width={width} height={height} debug />
+        <PlatformerRenderer state={snapshot} width={width} height={height} debug={DEBUG_PLATFORMER} onRenderTime={onRenderTime} />
         {snapshot.status !== 'PLAYING' && (
           <View style={styles.manualStatus}>
             <Text style={styles.modalTitle}>{snapshot.status === 'READY' ? 'RUN, JUMP, COLLECT' : snapshot.status === 'PAUSED' ? 'GAME PAUSED' : snapshot.status === 'COMPLETE' ? 'LEVEL COMPLETE' : 'NICE TRY!'}</Text>
-            <Text style={styles.modalDescription}>Hold RUN, jump the gap, and swing near the friendly spider.</Text>
+            <Text style={styles.modalDescription}>Move with the left joystick. Tap Jump or Swing, and hold Crouch.</Text>
           </View>
         )}
       </View>
-      <View style={[styles.manualFooter, { paddingBottom: Math.max(bottomInset, insets.bottom, 8) + 4 }]}>
-        <View style={styles.hudStats}>
-          <HudStat label="SCORE" value={String(snapshot.score)} />
-          <HudStat label="STARS" value={String(snapshot.collectibles)} />
-          <HudStat label="DISTANCE" value={`${Math.floor(snapshot.distance)} m`} />
-        </View>
-        <DeveloperInputPad onInput={onInput} />
+      {DEBUG_PLATFORMER && (
+        <PerformanceTestControl
+          inputMode="TOUCH"
+          width={width}
+          height={height}
+          cameraState="OFF"
+          performance={performance}
+          captureRateHz={null}
+          poseRateHz={null}
+          motionRateHz={null}
+          skippedPoseFrames={null}
+          thermalState={null}
+          enabled={snapshot.status === 'PLAYING'}
+        />
+      )}
+      <View style={[styles.manualFooter, styles.manualFooterCentered, { paddingBottom: Math.max(bottomInset, insets.bottom, 8) + 4 }]}>
         <View style={styles.gameActions}>
           <AppButton title={snapshot.status === 'PLAYING' ? 'PAUSE' : snapshot.status === 'PAUSED' ? 'RESUME' : snapshot.status === 'READY' ? 'START' : 'PLAY AGAIN'} onPress={snapshot.status === 'PLAYING' ? onPause : snapshot.status === 'PAUSED' ? onResume : snapshot.status === 'READY' ? onStart : onRestart} style={styles.hudButton} />
-          <Text style={styles.manualFps}>GAME {gameFps} FPS</Text>
+          <Text style={styles.manualFps}>GAME RAF {gameFps.toFixed(1)} Hz</Text>
         </View>
       </View>
+      {snapshot.status !== 'COMPLETE' && snapshot.status !== 'GAME_OVER' && (
+        <GameTouchControls
+          onMovementChange={onMovement}
+          onInput={onTouchInput}
+          leftInset={leftInset}
+          rightInset={rightInset}
+          bottomInset={Math.max(bottomInset, insets.bottom)}
+        />
+      )}
     </View>
   );
 }
@@ -803,40 +1264,268 @@ function HudStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DeveloperInputPad({ onInput }: { onInput: (type: DevMotionEventType) => void }) {
+function PerformanceTestControl({
+  inputMode,
+  width,
+  height,
+  cameraState,
+  performance,
+  captureRateHz,
+  poseRateHz,
+  motionRateHz,
+  skippedPoseFrames,
+  thermalState,
+  enabled,
+}: {
+  inputMode: InputMode;
+  width: number;
+  height: number;
+  cameraState: string;
+  performance: RuntimePerformanceSnapshot;
+  captureRateHz: number | null;
+  poseRateHz: number | null;
+  motionRateHz: number | null;
+  skippedPoseFrames: number | null;
+  thermalState: string | null;
+  enabled: boolean;
+}) {
+  const [harness] = useState(() => new PerformanceTestHarness());
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [clockNow, setClockNow] = useState(0);
+  const [report, setReport] = useState<ReturnType<PerformanceTestHarness['finish']>>(null);
+  const latestValues = useRef({
+    performance, captureRateHz, poseRateHz, motionRateHz, skippedPoseFrames, thermalState,
+  });
+
+  useEffect(() => {
+    latestValues.current = { performance, captureRateHz, poseRateHz, motionRateHz, skippedPoseFrames, thermalState };
+  }, [captureRateHz, motionRateHz, performance, poseRateHz, skippedPoseFrames, thermalState]);
+
+  useEffect(() => {
+    if (startedAt == null) return;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      const current = latestValues.current;
+      const sample: PerformanceTestValues = {
+        gameRafRateHz: current.performance.gameRafRateHz,
+        simulationRateHz: current.performance.simulationRateHz,
+        renderLoopRateHz: current.performance.renderLoopRateHz,
+        reactCommitRateHz: current.performance.reactCommitRateHz,
+        reactRenderMs: current.performance.reactRenderAverageMs,
+        captureRateHz: current.captureRateHz,
+        poseRateHz: current.poseRateHz,
+        motionRateHz: current.motionRateHz,
+        inputLatencyMs: null,
+        memoryMb: null,
+        skippedPoseFrames: current.skippedPoseFrames,
+      };
+      harness.record(sample, current.thermalState);
+      setClockNow(now);
+      if (now - startedAt >= PERFORMANCE_TEST_DURATION_MS) {
+        const finished = harness.finish(now);
+        setReport(finished);
+        setStartedAt(null);
+        if (finished && __DEV__) console.info('[PerformanceTest] 5-minute run complete.', finished);
+      }
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [harness, startedAt]);
+
+  const startTest = () => {
+    const now = Date.now();
+    harness.start({
+      device: 'N/A (device model not exposed)',
+      os: Platform.OS,
+      osVersion: 'N/A (OS version not exposed)',
+      ram: 'N/A (memory capacity not exposed)',
+      build: __DEV__ ? 'Development' : 'Production',
+      screenResolution: `${Math.round(width)}×${Math.round(height)}`,
+      inputMode,
+      cameraState,
+    }, now);
+    setReport(null);
+    setClockNow(now);
+    setStartedAt(now);
+  };
+
+  const stopTest = () => {
+    const now = Date.now();
+    const finished = harness.finish(now);
+    setReport(finished);
+    setStartedAt(null);
+    if (finished && __DEV__) console.info('[PerformanceTest] Run stopped.', finished);
+  };
+
+  const remainingSeconds = startedAt == null
+    ? PERFORMANCE_TEST_DURATION_MS / 1_000
+    : Math.max(0, Math.ceil((PERFORMANCE_TEST_DURATION_MS - (clockNow - startedAt)) / 1_000));
+  const simulationSummary = report?.metrics.simulationRateHz;
   return (
-    <View style={styles.devPad}>
-      <HoldButton title="RUN" onStart={() => onInput('RUN_START')} onEnd={() => onInput('RUN_STOP')} />
-      <TapButton title="JUMP" onPress={() => onInput('JUMP')} />
-      <TapButton title="SWING" onPress={() => onInput('ARM_SWING')} />
-      <HoldButton title="CROUCH" onStart={() => onInput('CROUCH_START')} onEnd={() => onInput('CROUCH_END')} />
+    <View style={styles.performanceTestControl}>
+      <AppButton
+        title={startedAt == null ? '5 MIN PERF TEST' : `STOP · ${Math.floor(remainingSeconds / 60)}:${String(remainingSeconds % 60).padStart(2, '0')}`}
+        variant="light"
+        style={styles.performanceTestButton}
+        onPress={startedAt == null ? startTest : stopTest}
+        disabled={startedAt == null && !enabled}
+      />
+      {report && (
+        <Text style={styles.performanceTestSummary}>
+          LAST {report.durationSeconds.toFixed(0)}s · SIM {formatMetric(simulationSummary?.average)} avg / {formatMetric(simulationSummary?.minimum)} min · RAF {formatMetric(report.metrics.gameRafRateHz?.average)} avg · POSE {formatMetric(report.metrics.poseRateHz?.average)} Hz · LATENCY {formatMetric(report.metrics.inputLatencyMs?.average)} ms · MEMORY {formatMetric(report.metrics.memoryMb?.average)} MB
+        </Text>
+      )}
     </View>
   );
 }
 
-function HoldButton({ title, onStart, onEnd }: { title: string; onStart: () => void; onEnd: () => void }) {
+function formatMetric(value: number | undefined): string {
+  return value == null ? 'N/A' : value.toFixed(1);
+}
+
+function GameTouchControls({
+  onMovementChange,
+  onInput,
+  leftInset,
+  rightInset,
+  bottomInset,
+}: {
+  onMovementChange: (movement: HorizontalMovement | null) => void;
+  onInput: (type: DevMotionEventType) => void;
+  leftInset: number;
+  rightInset: number;
+  bottomInset: number;
+}) {
   return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={`Developer ${title.toLowerCase()} input`}
-      onPressIn={onStart}
-      onPressOut={onEnd}
-      style={({ pressed }) => [styles.devButton, pressed && styles.devButtonPressed]}
-    >
-      <Text style={styles.devButtonText}>{title}</Text>
-    </Pressable>
+    <View pointerEvents="box-none" style={styles.touchControlsRoot}>
+      <View
+        pointerEvents="box-none"
+        style={[
+          styles.movementControlPosition,
+          { left: Math.max(leftInset, 14) + 10, bottom: Math.max(bottomInset, 10) + 10 },
+        ]}
+      >
+        <MovementJoystick onChange={onMovementChange} />
+      </View>
+      <View
+        style={[
+          styles.actionControlsPosition,
+          { right: Math.max(rightInset, 14) + 10, bottom: Math.max(bottomInset, 10) + 12 },
+        ]}
+      >
+        <TouchActionButton icon="↻" label="SWING" onPress={() => onInput('ARM_SWING')} />
+        <TouchActionButton
+          icon="↓"
+          label="CROUCH"
+          onPressIn={() => onInput('CROUCH_START')}
+          onPressOut={() => onInput('CROUCH_END')}
+        />
+        <TouchActionButton
+          icon="↑"
+          label="JUMP"
+          large
+          onPress={() => onInput('JUMP')}
+        />
+      </View>
+    </View>
   );
 }
 
-function TapButton({ title, onPress }: { title: string; onPress: () => void }) {
+function MovementJoystick({
+  onChange,
+}: {
+  onChange: (movement: HorizontalMovement | null) => void;
+}) {
+  const [thumbPosition, setThumbPosition] = useState({ x: 0, y: 0 });
+  const updateFromPoint = useCallback((x: number, y: number) => {
+    const maxTravel = 42;
+    const offsetX = x - 70;
+    const offsetY = y - 70;
+    const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY);
+    const scale = distance > maxTravel ? maxTravel / distance : 1;
+    const thumbX = offsetX * scale;
+    const thumbY = offsetY * scale;
+    const normalizedX = thumbX / maxTravel;
+    const centered = Math.abs(normalizedX) < 0.12;
+
+    setThumbPosition({ x: thumbX, y: thumbY });
+    onChange({
+      direction: centered ? 0 : normalizedX < 0 ? -1 : 1,
+      intensity: centered ? 0 : Math.abs(normalizedX),
+    });
+  }, [onChange]);
+  const returnToCenter = useCallback(() => {
+    setThumbPosition({ x: 0, y: 0 });
+    onChange(null);
+  }, [onChange]);
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (event) => {
+      updateFromPoint(event.nativeEvent.locationX, event.nativeEvent.locationY);
+    },
+    onPanResponderMove: (event) => {
+      updateFromPoint(event.nativeEvent.locationX, event.nativeEvent.locationY);
+    },
+    onPanResponderRelease: returnToCenter,
+    onPanResponderTerminate: returnToCenter,
+    onPanResponderTerminationRequest: () => false,
+  }), [returnToCenter, updateFromPoint]);
+
+  useEffect(() => () => onChange(null), [onChange]);
+
+  return (
+    <View
+      {...panResponder.panHandlers}
+      style={styles.joystickBase}
+      accessible
+      accessibilityRole="adjustable"
+      accessibilityLabel="Movement joystick. Slide left or right to move."
+    >
+      <View pointerEvents="none" style={styles.joystickTrack} />
+      <View
+        pointerEvents="none"
+        style={[
+          styles.joystickThumb,
+          { transform: [{ translateX: thumbPosition.x }, { translateY: thumbPosition.y }] },
+        ]}
+      >
+        <Text style={styles.joystickThumbIcon}>↔</Text>
+      </View>
+    </View>
+  );
+}
+
+function TouchActionButton({
+  icon,
+  label,
+  large = false,
+  onPress,
+  onPressIn,
+  onPressOut,
+}: {
+  icon: string;
+  label: string;
+  large?: boolean;
+  onPress?: () => void;
+  onPressIn?: () => void;
+  onPressOut?: () => void;
+}) {
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Developer ${title.toLowerCase()} input`}
+      accessibilityLabel={label}
+      hitSlop={6}
       onPress={onPress}
-      style={({ pressed }) => [styles.devButton, pressed && styles.devButtonPressed]}
+      onPressIn={onPressIn}
+      onPressOut={onPressOut}
+      style={({ pressed }) => [
+        styles.touchActionButton,
+        large && styles.touchActionButtonLarge,
+        pressed && styles.touchActionButtonPressed,
+      ]}
     >
-      <Text style={styles.devButtonText}>{title}</Text>
+      <Text style={[styles.touchActionIcon, large && styles.touchActionIconLarge]}>{icon}</Text>
+      <Text style={styles.touchActionLabel}>{label}</Text>
     </Pressable>
   );
 }
@@ -890,10 +1579,39 @@ const styles = StyleSheet.create({
   gateTitle: { color: colors.white, fontSize: 30, lineHeight: 36, fontWeight: '900', textAlign: 'center' },
   gateDescription: { maxWidth: 420, color: '#E0E9F2', fontSize: 15, lineHeight: 22, textAlign: 'center' },
   gateError: { color: '#FDE68A', fontSize: 14, textAlign: 'center' },
+  modeSelectRoot: { flex: 1, justifyContent: 'center', gap: spacing.lg, paddingHorizontal: spacing.xl, backgroundColor: '#F4F8FC' },
+  modeSelectHeader: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md },
+  modeSelectEyebrow: { color: colors.primaryDark, fontSize: 13, fontWeight: '900', letterSpacing: 2 },
+  modeSelectTitle: { color: colors.text, fontSize: 23, lineHeight: 28, fontWeight: '900', textAlign: 'center' },
+  modeSelectOptions: { flexDirection: 'row', gap: spacing.md },
+  modeChoice: { flex: 1, minHeight: 164, alignItems: 'center', justifyContent: 'center', gap: spacing.xs, padding: spacing.md, borderRadius: radius.lg, borderWidth: 2, borderColor: '#D5E1EC', backgroundColor: colors.white },
+  modeChoicePressed: { borderColor: colors.primary, backgroundColor: '#ECF6FF', transform: [{ scale: 0.98 }] },
+  modeChoiceIcon: { color: colors.primaryDark, fontSize: 34, lineHeight: 42, fontWeight: '900' },
+  modeChoiceTitle: { color: colors.text, fontSize: 17, fontWeight: '900', letterSpacing: 0.7 },
+  modeChoiceDetail: { maxWidth: 190, color: colors.textSecondary, fontSize: 13, lineHeight: 17, fontWeight: '700', textAlign: 'center' },
+  modeSelectFootnote: { alignSelf: 'center', maxWidth: 560, color: colors.textSecondary, fontSize: 12, lineHeight: 16, textAlign: 'center' },
   gameRoot: { flex: 1, backgroundColor: '#A9E7FF', overflow: 'hidden' },
+  touchControlsRoot: { ...StyleSheet.absoluteFill, zIndex: 2 },
+  movementControlPosition: { position: 'absolute' },
+  actionControlsPosition: { position: 'absolute', flexDirection: 'row', alignItems: 'flex-end', gap: 9 },
+  joystickBase: { width: 140, height: 140, alignItems: 'center', justifyContent: 'center', borderRadius: 70, borderWidth: 2, borderColor: 'rgba(255,255,255,0.76)', backgroundColor: 'rgba(13,30,48,0.38)' },
+  joystickTrack: { position: 'absolute', width: 88, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.35)' },
+  joystickThumb: { position: 'absolute', width: 54, height: 54, alignItems: 'center', justifyContent: 'center', borderRadius: 27, borderWidth: 2, borderColor: 'rgba(255,255,255,0.95)', backgroundColor: 'rgba(45,82,115,0.92)' },
+  joystickThumbIcon: { color: colors.white, fontSize: 25, lineHeight: 28, fontWeight: '900' },
+  touchActionButton: { width: 70, height: 70, alignItems: 'center', justifyContent: 'center', borderRadius: 35, borderWidth: 2, borderColor: 'rgba(255,255,255,0.82)', backgroundColor: 'rgba(13,30,48,0.72)' },
+  touchActionButtonLarge: { width: 86, height: 86, borderRadius: 43, backgroundColor: 'rgba(76,83,237,0.82)' },
+  touchActionButtonPressed: { opacity: 0.78, transform: [{ scale: 0.94 }] },
+  touchActionIcon: { color: colors.white, fontSize: 22, lineHeight: 25, fontWeight: '900' },
+  touchActionIconLarge: { fontSize: 28, lineHeight: 31 },
+  touchActionLabel: { marginTop: 1, color: colors.white, fontSize: 9, lineHeight: 11, fontWeight: '900', letterSpacing: 0.35 },
   setupShade: { ...StyleSheet.absoluteFill, justifyContent: 'center', backgroundColor: 'rgba(8, 20, 34, 0.08)' },
   setupShadeLandscape: { backgroundColor: 'transparent' },
   setupShadePortrait: { backgroundColor: 'transparent' },
+  calibrationShade: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center', padding: spacing.lg, backgroundColor: 'rgba(8,20,34,0.35)' },
+  calibrationCard: { width: '100%', maxWidth: 420, alignItems: 'center', gap: spacing.sm, padding: spacing.lg, borderRadius: radius.lg, backgroundColor: 'rgba(255,255,255,0.97)' },
+  calibrationTitle: { color: colors.text, fontSize: 28, lineHeight: 34, fontWeight: '900', textAlign: 'center' },
+  calibrationDescription: { color: colors.textSecondary, fontSize: 15, lineHeight: 21, textAlign: 'center' },
+  calibrationCountdown: { color: colors.primaryDark, fontSize: 54, lineHeight: 62, fontWeight: '900', fontVariant: ['tabular-nums'] },
   setupLayout: { flex: 1, justifyContent: 'flex-start', gap: spacing.xs, paddingHorizontal: spacing.md },
   setupLayoutLandscape: { width: '54%', maxWidth: 480, alignSelf: 'flex-start', backgroundColor: 'rgba(8,20,34,0.48)' },
   setupLayoutPortrait: { justifyContent: 'space-between' },
@@ -928,6 +1646,7 @@ const styles = StyleSheet.create({
   tutorialIcon: { color: colors.primaryDark, fontSize: 16, lineHeight: 19, fontWeight: '900' },
   tutorialTitle: { color: colors.text, fontSize: 10, fontWeight: '900', letterSpacing: 0.4 },
   tutorialDetail: { color: colors.textSecondary, fontSize: 9, textAlign: 'center' },
+  touchControlHint: { color: colors.textSecondary, fontSize: 10, lineHeight: 14, fontWeight: '700', textAlign: 'center' },
   safetyNote: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.xs, borderRadius: radius.md, backgroundColor: '#FFF7E6' },
   safetyTitle: { color: '#8A5A13', fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
   safetyText: { flex: 1, color: '#684E2E', fontSize: 10, lineHeight: 14 },
@@ -948,9 +1667,21 @@ const styles = StyleSheet.create({
   hudStatLabel: { color: colors.textSecondary, fontSize: 10, fontWeight: '900', letterSpacing: 0.5 },
   hudStatValue: { marginTop: 2, color: colors.text, fontSize: 18, lineHeight: 22, fontWeight: '900', fontVariant: ['tabular-nums'] },
   gameActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
+  inputModeBadge: { color: '#FFF3B4', fontSize: 10, fontWeight: '900', letterSpacing: 0.35 },
+  performanceTestControl: { position: 'absolute', top: 54, left: 10, zIndex: 6, maxWidth: '68%', padding: 5, borderRadius: radius.sm, backgroundColor: 'rgba(18,42,58,0.9)' },
+  performanceTestButton: { minWidth: 108, minHeight: 36, paddingHorizontal: spacing.xs },
+  performanceTestSummary: { marginTop: 3, color: '#E6FFF1', fontSize: 8, lineHeight: 11, fontVariant: ['tabular-nums'] },
   hudButton: { minWidth: 82, minHeight: 48, paddingHorizontal: spacing.sm },
   debugButton: { minWidth: 72, minHeight: 48, paddingHorizontal: spacing.xs },
   gameHint: { position: 'absolute', top: 62, alignSelf: 'center', zIndex: 2, minWidth: 190, alignItems: 'center', gap: 1, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.pill, borderWidth: 2, borderColor: '#FFFFFF', backgroundColor: 'rgba(28,54,80,0.9)' },
+  missionHud: { position: 'absolute', zIndex: 2, width: 205, gap: 2, paddingHorizontal: spacing.sm, paddingVertical: 5, borderRadius: radius.md, borderWidth: 1, borderColor: 'rgba(255,255,255,0.92)', backgroundColor: 'rgba(20,43,63,0.88)' },
+  missionHudEyebrow: { color: '#FFE46B', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  missionHudTitle: { color: colors.white, fontSize: 13, lineHeight: 16, fontWeight: '900' },
+  missionHudDescription: { color: '#F1F7FC', fontSize: 11, lineHeight: 14, fontWeight: '700' },
+  missionProgressRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: 1 },
+  missionProgressTrack: { flex: 1, height: 5, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.35)', overflow: 'hidden' },
+  missionProgressFill: { height: '100%', borderRadius: radius.pill, backgroundColor: '#FFE46B' },
+  missionProgressText: { color: colors.white, fontSize: 10, fontWeight: '900', fontVariant: ['tabular-nums'] },
   gameHintTitle: { color: '#FFE46B', fontSize: 20, lineHeight: 24, fontWeight: '900', letterSpacing: 0.5, textAlign: 'center' },
   gameHintText: { color: colors.white, fontSize: 13, lineHeight: 17, fontWeight: '700', textAlign: 'center' },
   trackingHint: { position: 'absolute', bottom: '18%', alignSelf: 'center', zIndex: 3, alignItems: 'center', gap: 2, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.md, borderWidth: 2, borderColor: '#FFFFFF', backgroundColor: 'rgba(28,54,80,0.92)' },
@@ -976,9 +1707,6 @@ const styles = StyleSheet.create({
   manualWorld: { ...StyleSheet.absoluteFill, top: 0 },
   manualStatus: { position: 'absolute', top: '40%', alignSelf: 'center', width: '70%', maxWidth: 440, gap: spacing.xs, alignItems: 'center', padding: spacing.md, borderRadius: radius.lg, backgroundColor: 'rgba(255,255,255,0.9)' },
   manualFooter: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 2, gap: spacing.xs, paddingHorizontal: spacing.md, paddingTop: spacing.xs, backgroundColor: 'rgba(242,248,247,0.94)' },
-  devPad: { flexDirection: 'row', gap: spacing.xs },
-  devButton: { flex: 1, minWidth: 0, minHeight: 42, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4, borderRadius: radius.md, borderWidth: 1, borderColor: '#C9D4F5', backgroundColor: '#FFFFFF' },
-  devButtonPressed: { backgroundColor: '#DCE3FF', transform: [{ scale: 0.97 }] },
-  devButtonText: { color: colors.text, fontSize: 10, fontWeight: '900', letterSpacing: 0.25 },
+  manualFooterCentered: { left: '38%', right: '38%', alignItems: 'center', paddingHorizontal: spacing.xs, borderTopLeftRadius: radius.md, borderTopRightRadius: radius.md },
   manualFps: { color: colors.textSecondary, fontSize: 10, fontWeight: '900' },
 });

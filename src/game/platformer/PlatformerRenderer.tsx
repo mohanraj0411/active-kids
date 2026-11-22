@@ -7,6 +7,7 @@ import Svg, {
   Rect,
   Text as SvgText,
 } from 'react-native-svg';
+import { memo, Profiler, type ProfilerOnRenderCallback } from 'react';
 
 import { PLATFORMER_CONFIG } from './config';
 import type {
@@ -21,6 +22,7 @@ interface PlatformerRendererProps {
   width: number;
   height: number;
   debug?: boolean;
+  onRenderTime?: (durationMs: number) => void;
 }
 
 const DECORATION_RATIOS = [
@@ -37,20 +39,24 @@ export function PlatformerRenderer({
   width,
   height,
   debug = false,
+  onRenderTime,
 }: PlatformerRendererProps) {
   const scale = Math.max(0.65, width / PLATFORMER_CONFIG.referenceWidth);
   const player = state.player;
   const playerX = player.x;
   const isRunning = player.state === 'RUNNING' || (player.state === 'ATTACKING' && player.running);
   const isCrouching = player.state === 'CROUCHING';
+  const isHit = player.state === 'HIT';
+  const isCelebrating = player.state === 'CELEBRATING';
   const phase = Math.sin(player.animationTime * 13);
-  const idleBob = player.state === 'IDLE'
+  const idleBob = player.state === 'IDLE' || isCelebrating
     ? Math.sin(player.animationTime * 3) * 2 * scale
     : 0;
   const runBounce = isRunning ? Math.abs(phase) * 3 * scale : 0;
+  const hitShake = isHit ? Math.sin(player.animationTime * 48) * 3 * scale : 0;
   const runningAnimation = isRunning ? phase : 0;
   const jumpAnimation = player.state === 'JUMPING' || player.state === 'FALLING';
-  const headX = playerX + player.width / 2;
+  const headX = playerX + player.width / 2 + hitShake;
   const animatedTop = player.y - idleBob - runBounce;
   const headY = animatedTop + player.height * (isCrouching ? 0.22 : 0.2);
   const bodyTop = animatedTop + player.height * 0.39;
@@ -66,16 +72,24 @@ export function PlatformerRenderer({
   const rightFootX = bodyCenterX + 7 * scale + runningAnimation * legSpan;
   const legLift = jumpAnimation ? (player.state === 'JUMPING' ? -8 : 5) * scale : 0;
   const kneeY = hipY + (footY - hipY) * 0.48;
-  const leftHandX = player.state === 'ATTACKING'
+  const leftHandX = isCelebrating
+    ? bodyCenterX - 24 * scale
+    : player.state === 'ATTACKING'
+      ? bodyCenterX + 24 * scale
+      : bodyCenterX - (14 + runningAnimation * 5) * scale;
+  const leftHandY = isCelebrating
+    ? shoulderY - 22 * scale
+    : shoulderY + (17 + runningAnimation * 4) * scale;
+  const rightHandX = isCelebrating
     ? bodyCenterX + 24 * scale
-    : bodyCenterX - (14 + runningAnimation * 5) * scale;
-  const leftHandY = shoulderY + (17 + runningAnimation * 4) * scale;
-  const rightHandX = player.state === 'ATTACKING'
-    ? bodyCenterX + 23 * scale
-    : bodyCenterX + (14 + runningAnimation * 5) * scale;
-  const rightHandY = player.state === 'ATTACKING'
-    ? shoulderY + 8 * scale
-    : shoulderY + (17 - runningAnimation * 5) * scale;
+    : player.state === 'ATTACKING'
+      ? bodyCenterX + 23 * scale
+      : bodyCenterX + (14 + runningAnimation * 5) * scale;
+  const rightHandY = isCelebrating
+    ? shoulderY - 22 * scale
+    : player.state === 'ATTACKING'
+      ? shoulderY + 8 * scale
+      : shoulderY + (17 - runningAnimation * 5) * scale;
   const windup = player.attackProgress < 0.28;
   const swing = player.attackProgress >= 0.28 && player.attackProgress < 0.66;
   const batAngle = !player.attacking
@@ -85,12 +99,17 @@ export function PlatformerRenderer({
       : swing
         ? -2.3 + ((player.attackProgress - 0.28) / 0.38) * 2.75
         : 0.45 + ((player.attackProgress - 0.66) / 0.34) * 0.45;
-  const batLength = 56 * scale;
+  const batLength = isCelebrating ? 0 : 56 * scale;
   const batTipX = rightHandX + Math.cos(batAngle) * batLength;
   const batTipY = rightHandY + Math.sin(batAngle) * batLength;
   const hitbox = player.attackHitActive ? getAttackRect(player, scale) : null;
 
+  const handleProfilerRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration) => {
+    onRenderTime?.(actualDuration);
+  };
+
   return (
+    <Profiler id="platformer-svg" onRender={handleProfilerRender}>
     <Svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
       <Rect x={0} y={0} width={width} height={height} fill="#A9E7FF" />
       <Circle cx={width * 0.82} cy={48 * scale} r={24 * scale} fill="#FFF3A6" />
@@ -115,14 +134,14 @@ export function PlatformerRenderer({
       />
 
       <G transform={`translate(${-state.cameraOffset} 0)`}>
-        <Ground state={state} scale={scale} height={height} />
+        <Ground level={state.level} scale={scale} height={height} />
         <WorldDecorations
           worldWidth={state.level.worldWidth}
           groundY={state.level.groundY}
           scale={scale}
           crouchGates={state.level.crouchGates ?? []}
         />
-        {state.level.objects.map((object) => (
+        {state.objects.map((object) => (
           <WorldObject
             key={object.id}
             object={object}
@@ -132,6 +151,17 @@ export function PlatformerRenderer({
           />
         ))}
         {state.feedback && renderFeedback(state.feedback, state.elapsedSeconds, scale)}
+        {state.surprise && (
+          <SurpriseVisual
+            event={state.surprise}
+            cameraOffset={state.cameraOffset}
+            elapsedSeconds={state.elapsedSeconds}
+            width={width}
+            height={height}
+            scale={scale}
+          />
+        )}
+        <CompanionCharacter companion={state.companion} elapsedSeconds={state.elapsedSeconds} scale={scale} />
         <G>
           <Line
             x1={bodyCenterX}
@@ -177,8 +207,8 @@ export function PlatformerRenderer({
             x={bodyCenterX - player.width * 0.28}
             height={bodyHeight}
             rx={13 * scale}
-            fill="#31BD93"
-            stroke="#167757"
+            fill={isHit ? '#F28B62' : isCelebrating ? '#FFD943' : '#31BD93'}
+            stroke={isHit ? '#B8554B' : isCelebrating ? '#C58D20' : '#167757'}
             strokeWidth={2 * scale}
           />
           <Path d={`M${bodyCenterX - 9 * scale} ${bodyTop + 3 * scale} l${9 * scale} ${7 * scale} l${9 * scale} ${-7 * scale}`} fill="none" stroke="#E8FFF5" strokeWidth={2.5 * scale} strokeLinecap="round" strokeLinejoin="round" />
@@ -197,8 +227,8 @@ export function PlatformerRenderer({
             strokeWidth={7 * scale}
             strokeLinecap="round"
           />
-          <Line x1={rightHandX} y1={rightHandY} x2={batTipX} y2={batTipY} stroke="#8B552E" strokeWidth={8 * scale} strokeLinecap="round" />
-          <Line x1={rightHandX + Math.cos(batAngle) * batLength * 0.78} y1={rightHandY + Math.sin(batAngle) * batLength * 0.78} x2={batTipX} y2={batTipY} stroke="#F4C95D" strokeWidth={11 * scale} strokeLinecap="round" />
+          {!isCelebrating && <Line x1={rightHandX} y1={rightHandY} x2={batTipX} y2={batTipY} stroke="#8B552E" strokeWidth={8 * scale} strokeLinecap="round" />}
+          {!isCelebrating && <Line x1={rightHandX + Math.cos(batAngle) * batLength * 0.78} y1={rightHandY + Math.sin(batAngle) * batLength * 0.78} x2={batTipX} y2={batTipY} stroke="#F4C95D" strokeWidth={11 * scale} strokeLinecap="round" />}
           <Circle cx={rightHandX} cy={rightHandY} r={4.5 * scale} fill="#FFD2A8" />
           {player.attackHitActive && (
             <Path
@@ -256,13 +286,17 @@ export function PlatformerRenderer({
             strokeWidth={2 * scale}
           />
         )}
+        {state.worldReaction && (
+          <WorldReactionParticles reaction={state.worldReaction} elapsedSeconds={state.elapsedSeconds} scale={scale} />
+        )}
       </G>
 
     </Svg>
+    </Profiler>
   );
 }
 
-function WorldDecorations({
+const WorldDecorations = memo(function WorldDecorations({
   worldWidth,
   groundY,
   scale,
@@ -306,29 +340,18 @@ function WorldDecorations({
       })}
     </G>
   );
-}
+});
 
-function Ground({
-  state,
+const Ground = memo(function Ground({
+  level,
   scale,
   height,
 }: {
-  state: PlatformerSnapshot;
+  level: PlatformerSnapshot['level'];
   scale: number;
   height: number;
 }) {
-  const gaps = state.level.objects
-    .filter((object): object is Extract<PlatformerLevelObject, { type: 'GAP' }> => object.type === 'GAP')
-    .sort((first, second) => first.x - second.x);
-  const segments: { x: number; width: number }[] = [];
-  let cursor = 0;
-  for (const gap of gaps) {
-    if (gap.x > cursor) segments.push({ x: cursor, width: gap.x - cursor });
-    cursor = gap.x + gap.width;
-  }
-  if (state.level.worldWidth > cursor) {
-    segments.push({ x: cursor, width: state.level.worldWidth - cursor });
-  }
+  const segments = getGroundSegments(level);
 
   return (
     <>
@@ -336,14 +359,14 @@ function Ground({
         <G key={`${segment.x}-${segment.width}`}>
           <Rect
             x={segment.x}
-            y={state.level.groundY}
+            y={level.groundY}
             width={segment.width}
-            height={height - state.level.groundY + 50 * scale}
+            height={height - level.groundY + 50 * scale}
             fill="#63B966"
           />
           <Rect
             x={segment.x}
-            y={state.level.groundY}
+            y={level.groundY}
             width={segment.width}
             height={12 * scale}
             fill="#3D9C57"
@@ -352,6 +375,26 @@ function Ground({
       ))}
     </>
   );
+});
+
+const groundSegmentsByLevel = new WeakMap<PlatformerSnapshot['level'], readonly { x: number; width: number }[]>();
+
+function getGroundSegments(level: PlatformerSnapshot['level']): readonly { x: number; width: number }[] {
+  const cached = groundSegmentsByLevel.get(level);
+  if (cached) return cached;
+  const gaps = level.objects
+    .filter((object): object is Extract<PlatformerLevelObject, { type: 'GAP' }> => object.type === 'GAP')
+    .sort((first, second) => first.x - second.x);
+  const segments: { x: number; width: number }[] = [];
+  let cursor = 0;
+  for (const gap of gaps) {
+    if (gap.x > cursor) segments.push({ x: cursor, width: gap.x - cursor });
+    cursor = gap.x + gap.width;
+  }
+  if (level.worldWidth > cursor) segments.push({ x: cursor, width: level.worldWidth - cursor });
+  const stableSegments = Object.freeze(segments.map((segment) => Object.freeze(segment)));
+  groundSegmentsByLevel.set(level, stableSegments);
+  return stableSegments;
 }
 
 function WorldObject({
@@ -399,7 +442,20 @@ function WorldObject({
         );
       }
     case 'ENEMY':
-      return object.defeated ? null : <FriendlySpider object={object} scale={scale} elapsedSeconds={elapsedSeconds} />;
+      if (object.defeated) {
+        const hitAge = object.hitAt == null ? Number.POSITIVE_INFINITY : elapsedSeconds - object.hitAt;
+        return hitAge < 0.48
+          ? <EnemyDefeatEffect object={object} scale={scale} elapsedSeconds={elapsedSeconds} />
+          : null;
+      }
+      return (
+        <FriendlySpider
+          object={object}
+          scale={scale}
+          elapsedSeconds={elapsedSeconds}
+          moving={object.state === 'MOVE'}
+        />
+      );
     case 'GAP':
       return (
         <G>
@@ -426,10 +482,14 @@ function renderFeedback(
   const age = elapsedSeconds - feedback.time;
   if (age < 0 || age > 0.95) return null;
   const progress = age / 0.95;
-  const color = feedback.type === 'COLLECTIBLE'
+  const color = feedback.type === 'COLLECTIBLE' || feedback.type === 'COMBO'
     ? '#FFF17A'
     : feedback.type === 'ENEMY_HIT'
       ? '#B7FF8A'
+      : feedback.type === 'RESPAWN'
+        ? '#FFD6A8'
+        : feedback.type === 'GATE'
+          ? '#E9F5FF'
       : '#FFFFFF';
   return (
     <G key={`feedback-${feedback.id}`} opacity={1 - progress}>
@@ -439,7 +499,7 @@ function renderFeedback(
         fill={color}
         stroke="#43536B"
         strokeWidth={2.5 * scale}
-        fontSize={(feedback.type === 'COLLECTIBLE' ? 24 : 21) * scale}
+        fontSize={(feedback.type === 'COLLECTIBLE' || feedback.type === 'COMBO' ? 24 : 21) * scale}
         fontWeight="900"
         textAnchor="middle"
       >
@@ -449,10 +509,144 @@ function renderFeedback(
   );
 }
 
-function FriendlySpider({ object, scale, elapsedSeconds }: { object: EnemyObject; scale: number; elapsedSeconds: number }) {
+function EnemyDefeatEffect({
+  object,
+  scale,
+  elapsedSeconds,
+}: {
+  object: EnemyObject;
+  scale: number;
+  elapsedSeconds: number;
+}) {
+  const progress = Math.max(0, Math.min(1, (elapsedSeconds - (object.hitAt ?? elapsedSeconds)) / 0.48));
+  const x = object.x + object.width / 2;
+  const y = object.y + object.height * 0.55 - progress * 24 * scale;
+  return (
+    <G opacity={1 - progress}>
+      <Circle cx={x} cy={y} r={(20 + progress * 14) * scale} fill="#FFF0A8" opacity={0.72} />
+      <SvgText x={x} y={y + 5 * scale} fill="#68517C" fontSize={15 * scale} fontWeight="900" textAnchor="middle">POP!</SvgText>
+    </G>
+  );
+}
+
+function CompanionCharacter({
+  companion,
+  elapsedSeconds,
+  scale,
+}: {
+  companion: PlatformerSnapshot['companion'];
+  elapsedSeconds: number;
+  scale: number;
+}) {
+  const animated = companion.mood !== 'WAITING';
+  const bounce = animated ? Math.abs(Math.sin(elapsedSeconds * 9)) * 5 * scale : Math.sin(elapsedSeconds * 3) * 1.5 * scale;
+  const fill = companion.mood === 'ENCOURAGING' ? '#8CC8F0' : '#8BE0C1';
+  return (
+    <G transform={`translate(${companion.x} ${companion.y - bounce})`}>
+      <Path d={`M${8 * scale} ${20 * scale} Q${-1 * scale} ${10 * scale} ${6 * scale} ${5 * scale}`} fill="none" stroke="#397B87" strokeWidth={3 * scale} strokeLinecap="round" />
+      <Circle cx={16 * scale} cy={17 * scale} r={14 * scale} fill={fill} stroke="#397B87" strokeWidth={2 * scale} />
+      <Circle cx={11 * scale} cy={15 * scale} r={2 * scale} fill="#24384A" />
+      <Circle cx={20 * scale} cy={15 * scale} r={2 * scale} fill="#24384A" />
+      <Path d={`M${13 * scale} ${21 * scale} q${3 * scale} ${3 * scale} ${6 * scale} 0`} fill="none" stroke="#397B87" strokeWidth={1.6 * scale} strokeLinecap="round" />
+      <Path d={`M${27 * scale} ${19 * scale} l${9 * scale} ${4 * scale} l${-9 * scale} ${4 * scale} z`} fill="#F4A85B" stroke="#C77B3E" strokeWidth={1.2 * scale} />
+      <Line x1={12 * scale} y1={30 * scale} x2={10 * scale} y2={34 * scale} stroke="#C77B3E" strokeWidth={2 * scale} strokeLinecap="round" />
+      <Line x1={21 * scale} y1={30 * scale} x2={23 * scale} y2={34 * scale} stroke="#C77B3E" strokeWidth={2 * scale} strokeLinecap="round" />
+      {companion.mood === 'CELEBRATING' && (
+        <Polygon points={makeStarPoints(16 * scale, -2 * scale, 6 * scale, 3 * scale)} fill="#FFE46B" />
+      )}
+    </G>
+  );
+}
+
+function WorldReactionParticles({
+  reaction,
+  elapsedSeconds,
+  scale,
+}: {
+  reaction: NonNullable<PlatformerSnapshot['worldReaction']>;
+  elapsedSeconds: number;
+  scale: number;
+}) {
+  const progress = Math.max(0, Math.min(1, (elapsedSeconds - reaction.startedAt) / reaction.duration));
+  const count = reaction.type === 'COMBO' ? 7 : 4;
+  const colors = reaction.type === 'FAIL'
+    ? ['#BDE7FF', '#FFFFFF']
+    : reaction.type === 'COMBO' || reaction.type === 'MISSION'
+      ? ['#FFE46B', '#FFFFFF', '#8BE0C1']
+      : ['#FFF6B5', '#FFFFFF'];
+  return (
+    <G opacity={1 - progress}>
+      {Array.from({ length: count }, (_, index) => {
+        const angle = (index / count) * Math.PI * 2;
+        const distance = (10 + progress * 38) * scale * reaction.intensity;
+        return (
+          <Circle
+            key={`${reaction.id}-${index}`}
+            cx={reaction.x + Math.cos(angle) * distance}
+            cy={reaction.y + Math.sin(angle) * distance}
+            r={(3 + reaction.intensity * 2) * scale * (1 - progress * 0.45)}
+            fill={colors[index % colors.length]}
+          />
+        );
+      })}
+    </G>
+  );
+}
+
+function SurpriseVisual({
+  event,
+  cameraOffset,
+  elapsedSeconds,
+  width,
+  height,
+  scale,
+}: {
+  event: NonNullable<PlatformerSnapshot['surprise']>;
+  cameraOffset: number;
+  elapsedSeconds: number;
+  width: number;
+  height: number;
+  scale: number;
+}) {
+  const screenX = width * (1.12 - event.progress * 1.28);
+  const x = cameraOffset + screenX;
+  const y = height * 0.2 + Math.sin(elapsedSeconds * 5) * 5 * scale;
+  if (event.type === 'BIRD') {
+    const wing = Math.sin(elapsedSeconds * 18) * 8 * scale;
+    return (
+      <G>
+        <Circle cx={x} cy={y} r={9 * scale} fill="#6B85C5" />
+        <Circle cx={x + 7 * scale} cy={y - 3 * scale} r={6 * scale} fill="#8DA6E4" />
+        <Path d={`M${x - 2 * scale} ${y} q${-10 * scale} ${-14 * scale - wing} ${-16 * scale} ${-6 * scale}`} fill="none" stroke="#526DAF" strokeWidth={4 * scale} strokeLinecap="round" />
+        <Path d={`M${x + 3 * scale} ${y} q${10 * scale} ${-14 * scale + wing} ${16 * scale} ${-6 * scale}`} fill="none" stroke="#526DAF" strokeWidth={4 * scale} strokeLinecap="round" />
+        <Path d={`M${x + 12 * scale} ${y - 3 * scale} l${8 * scale} ${3 * scale} l${-8 * scale} ${3 * scale} z`} fill="#F4A85B" />
+      </G>
+    );
+  }
+  return (
+    <G>
+      {Array.from({ length: 6 }, (_, index) => {
+        const leafX = x + Math.sin(index * 7 + elapsedSeconds * 3) * 36 * scale;
+        const leafY = y + ((event.progress * 120 + index * 23) % 120) * scale;
+        return (
+          <G key={`${event.id}-${index}`} transform={`rotate(${index * 41 + elapsedSeconds * 18} ${leafX} ${leafY})`}>
+            <Path d={`M${leafX} ${leafY - 5 * scale} q${9 * scale} ${5 * scale} 0 ${10 * scale} q${-9 * scale} ${-5 * scale} 0 ${-10 * scale} z`} fill={index % 2 ? '#F4B85B' : '#F08F61'} />
+          </G>
+        );
+      })}
+    </G>
+  );
+}
+
+function FriendlySpider({ object, scale, elapsedSeconds, moving }: {
+  object: EnemyObject;
+  scale: number;
+  elapsedSeconds: number;
+  moving: boolean;
+}) {
   const centerX = object.x + object.width / 2;
-  const centerY = object.y + object.height * 0.57 + Math.sin(elapsedSeconds * 4 + object.x) * 2.5 * scale;
-  const legWiggle = Math.sin(elapsedSeconds * 7 + object.x) * 2 * scale;
+  const centerY = object.y + object.height * 0.57 + Math.sin(elapsedSeconds * (moving ? 7 : 3) + object.x) * (moving ? 4 : 2) * scale;
+  const legWiggle = Math.sin(elapsedSeconds * (moving ? 11 : 5) + object.x) * (moving ? 5 : 2) * scale;
   return (
     <G>
       <G stroke="#69547E" strokeWidth={4 * scale} strokeLinecap="round" fill="none">

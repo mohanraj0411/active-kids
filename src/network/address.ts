@@ -44,3 +44,12 @@ export function getWebSocketUrlFromWebPage(): string | null {
   if (Number(location.port) !== NETWORK_HOST_PORT) return null;
   return normalizeWebSocketUrl(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${NETWORK_SOCKET_PATH}`);
 }
+
+/** Uses the origin serving the TV receiver web app, including custom ports. */
+export function getReceiverWebSocketUrl(): string | null {
+  if (typeof globalThis.window === 'undefined') return null;
+  const location = globalThis.window.location;
+  return normalizeWebSocketUrl(
+    `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${NETWORK_SOCKET_PATH}`,
+  );
+}

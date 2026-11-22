@@ -44,6 +44,9 @@ export interface PoseResult {
   cameraMirrored?: boolean;
   frameNumber?: number;
   inferenceDurationMs?: number;
+  thermalState?: 'nominal' | 'fair' | 'serious' | 'critical' | 'unknown';
+  poseModelDelegate?: 'CPU' | 'GPU';
+  poseModelVariant?: 'lite' | 'full' | 'heavy';
 }
 
 export interface PoseDetectorOutput {
@@ -107,6 +110,7 @@ export interface PoseDetectorCameraProps {
 export type PoseDetectorErrorCode =
   | 'nativeModuleUnavailable'
   | 'cameraPermission'
+  | 'cameraFacingUnavailable'
   | 'cameraUnavailable'
   | 'modelInitialization'
   | 'inferenceFailure'

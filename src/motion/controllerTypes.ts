@@ -2,6 +2,29 @@ import type { MotionResult } from './types';
 
 export type MotionType = 'IDLE' | 'RUN' | 'JUMP' | 'ARM_SWING' | 'CROUCH';
 
+export type HorizontalDirection = -1 | 0 | 1;
+
+export interface HorizontalMovement {
+  direction: HorizontalDirection;
+  intensity: number;
+}
+
+export interface BodyLeanState extends HorizontalMovement {
+  /** Lean angle relative to the calibrated neutral pose. */
+  angleDegrees: number;
+  /** Absolute torso angle measured from the camera frame. */
+  rawAngleDegrees: number | null;
+  trackingConfidence: number;
+  isTracking: boolean;
+  calibrated: boolean;
+  calibrating: boolean;
+}
+
+export const NEUTRAL_HORIZONTAL_MOVEMENT: Readonly<HorizontalMovement> = Object.freeze({
+  direction: 0,
+  intensity: 0,
+});
+
 export type MotionEventType =
   | 'RUN_START'
   | 'RUN_STOP'

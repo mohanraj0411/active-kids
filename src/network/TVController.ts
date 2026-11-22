@@ -2,21 +2,26 @@ import { createMotionEvent, GameInputController } from '../game/platformer/GameI
 import type { MotionEventType } from '../motion/controllerTypes';
 import {
   NETWORK_HEARTBEAT_TIMEOUT_MS,
+  NETWORK_MOVEMENT_TIMEOUT_MS,
 } from './networkConstants';
 import {
   NetworkManager,
   type NetworkScheduler,
 } from './NetworkManager';
-import type { NetworkMessage } from './protocol';
+import type { NetworkInputAction, NetworkMessage } from './protocol';
 
 declare const __DEV__: boolean;
 
 export interface TVControllerSnapshot {
   phoneConnected: boolean;
   lastSequence: number;
+  lastInputTimestamp: number | null;
   lastEvent: MotionEventType | null;
-  latencyMs: number | null;
+  /** Actual accepted INPUT messages in the trailing one-second window. */
+  inputRatePerSecond: number;
   lastPhoneHeartbeatAt: number | null;
+  lastAction: NetworkInputAction | null;
+  movement: number;
 }
 
 export interface TVControllerOptions {
@@ -25,6 +30,7 @@ export interface TVControllerOptions {
   onChange?: (snapshot: TVControllerSnapshot) => void;
   onLog?: (message: string) => void;
   onGameInput?: () => void;
+  onControl?: (action: Exclude<NetworkInputAction, 'MOTION_EVENT' | 'MOVE'>) => void;
 }
 
 /** Validates remote input again at the game boundary and releases held actions on loss. */
@@ -34,15 +40,21 @@ export class TVController {
   private readonly onChange?: TVControllerOptions['onChange'];
   private readonly onLog?: TVControllerOptions['onLog'];
   private readonly onGameInput?: TVControllerOptions['onGameInput'];
+  private readonly onControl?: TVControllerOptions['onControl'];
   private readonly unsubscribeMessages: () => void;
   private readonly unsubscribeState: () => void;
   private timeoutTimer: unknown = null;
   private sessionId: string | null = null;
   private phoneConnected = false;
   private lastSequence = 0;
+  private lastInputTimestamp: number | null = null;
   private lastEvent: MotionEventType | null = null;
-  private latencyMs: number | null = null;
+  private inputArrivalTimes: number[] = [];
+  private inputRatePerSecond = 0;
   private lastPhoneHeartbeatAt: number | null = null;
+  private lastMovementAt: number | null = null;
+  private movement = 0;
+  private lastAction: NetworkInputAction | null = null;
   private running = false;
   private crouching = false;
   private disposed = false;
@@ -55,6 +67,7 @@ export class TVController {
     if (network.role !== 'TV_HOST') {
       throw new Error('TVController requires a TV_HOST network role.');
     }
+    gameInput.selectSource('NETWORK');
     this.scheduler = options.scheduler ?? {
       now: () => Date.now(),
       setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -64,9 +77,18 @@ export class TVController {
     this.onChange = options.onChange;
     this.onLog = options.onLog;
     this.onGameInput = options.onGameInput;
+    this.onControl = options.onControl;
     this.unsubscribeMessages = network.subscribeMessages((message) => this.handleMessage(message));
     this.unsubscribeState = network.subscribe((snapshot) => {
-      if (snapshot.state !== 'CONNECTED') this.releaseHeldInputs('TV network disconnected');
+      if (snapshot.state !== 'CONNECTED') {
+        const wasPhoneConnected = this.phoneConnected;
+        this.phoneConnected = false;
+        this.releaseHeldInputs('TV network disconnected');
+        if (wasPhoneConnected) {
+          this.onControl?.('PAUSE');
+          this.emit();
+        }
+      }
     });
     this.scheduleTimeoutCheck();
   }
@@ -75,9 +97,12 @@ export class TVController {
     return {
       phoneConnected: this.phoneConnected,
       lastSequence: this.lastSequence,
+      lastInputTimestamp: this.lastInputTimestamp,
       lastEvent: this.lastEvent,
-      latencyMs: this.latencyMs,
+      inputRatePerSecond: this.inputRatePerSecond,
       lastPhoneHeartbeatAt: this.lastPhoneHeartbeatAt,
+      lastAction: this.lastAction,
+      movement: this.movement,
     };
   }
 
@@ -92,6 +117,17 @@ export class TVController {
 
   /** Exposed for deterministic tests and diagnostics. */
   checkHeartbeatTimeout(now = this.scheduler.now()): boolean {
+    let timedOut = false;
+    const priorRate = this.inputRatePerSecond;
+    this.updateInputRate(now);
+    if (
+      this.movement !== 0 &&
+      this.lastMovementAt !== null &&
+      now - this.lastMovementAt > NETWORK_MOVEMENT_TIMEOUT_MS
+    ) {
+      this.releaseMovement('Movement input timed out');
+      timedOut = true;
+    }
     if (
       this.phoneConnected &&
       this.lastPhoneHeartbeatAt !== null &&
@@ -99,11 +135,13 @@ export class TVController {
     ) {
       this.phoneConnected = false;
       this.releaseHeldInputs('Phone heartbeat timed out');
+      this.onControl?.('PAUSE');
       this.log('Phone heartbeat timed out; released RUN and CROUCH');
       this.emit();
       return true;
     }
-    return false;
+    if (priorRate !== this.inputRatePerSecond) this.emit();
+    return timedOut;
   }
 
   private handleMessage(message: NetworkMessage): void {
@@ -123,9 +161,14 @@ export class TVController {
       }
       case 'PEER_STATUS':
         if (message.sessionId !== this.sessionId) return;
-        this.phoneConnected = message.phoneConnected;
-        if (!message.phoneConnected) this.releaseHeldInputs('Phone disconnected');
-        else this.lastPhoneHeartbeatAt ??= this.scheduler.now();
+        {
+          const wasPhoneConnected = this.phoneConnected;
+          this.phoneConnected = message.phoneConnected;
+          if (!message.phoneConnected) {
+            this.releaseHeldInputs('Phone disconnected');
+            if (wasPhoneConnected) this.onControl?.('PAUSE');
+          } else this.lastPhoneHeartbeatAt ??= this.scheduler.now();
+        }
         this.emit();
         break;
       case 'HEARTBEAT_ACK':
@@ -139,8 +182,12 @@ export class TVController {
         break;
       case 'DISCONNECT':
         if (message.sessionId !== this.sessionId || message.role !== 'PHONE_CONTROLLER') return;
-        this.phoneConnected = false;
-        this.releaseHeldInputs(message.reason ?? 'Phone disconnected');
+        {
+          const wasPhoneConnected = this.phoneConnected;
+          this.phoneConnected = false;
+          this.releaseHeldInputs(message.reason ?? 'Phone disconnected');
+          if (wasPhoneConnected) this.onControl?.('PAUSE');
+        }
         this.emit();
         break;
       default:
@@ -166,28 +213,49 @@ export class TVController {
     }
 
     this.lastSequence = message.sequence;
-    this.lastEvent = message.event;
-    this.latencyMs = Math.max(0, this.scheduler.now() - message.timestamp);
-    const event = createMotionEvent(message.event, message.timestamp, message.confidence);
-    this.gameInput.handleMotionEvent(event);
-    if (message.event === 'RUN_START') this.running = true;
-    else if (message.event === 'RUN_STOP') this.running = false;
-    else if (message.event === 'CROUCH_START') this.crouching = true;
-    else if (message.event === 'CROUCH_END') this.crouching = false;
+    this.lastInputTimestamp = message.timestamp;
+    this.lastAction = message.action;
+    this.lastEvent = message.event ?? null;
+    this.updateInputRate(this.scheduler.now(), true);
+    if (message.action === 'MOVE') {
+      const value = message.value ?? 0;
+      this.movement = value;
+      this.lastMovementAt = this.scheduler.now();
+      this.running = value !== 0;
+      this.gameInput.handleHorizontalMovement({
+        direction: value < 0 ? -1 : value > 0 ? 1 : 0,
+        intensity: Math.abs(value),
+      }, 'NETWORK');
+    } else if (message.action === 'MOTION_EVENT' && message.event) {
+      const event = createMotionEvent(message.event, message.timestamp, message.confidence ?? 1);
+      this.gameInput.handleMotionEvent(event, 'NETWORK');
+      if (message.event === 'RUN_START') this.running = true;
+      else if (message.event === 'RUN_STOP') this.running = false;
+      else if (message.event === 'CROUCH_START') this.crouching = true;
+      else if (message.event === 'CROUCH_END') this.crouching = false;
+    } else if (message.action !== 'MOTION_EVENT') {
+      if (message.action === 'CROUCH_START') this.crouching = true;
+      else if (message.action === 'CROUCH_END') this.crouching = false;
+      this.onControl?.(message.action);
+    }
     this.onGameInput?.();
-    this.log(`INPUT ${message.event} seq=${message.sequence} latency~${Math.round(this.latencyMs)}ms`);
+    this.log(`INPUT ${message.action} seq=${message.sequence}`);
     this.emit();
   }
 
   private releaseHeldInputs(reason: string, publish = true): void {
     let changed = false;
+    if (this.movement !== 0) {
+      this.releaseMovement(reason, false);
+      changed = true;
+    }
     if (this.running) {
-      this.gameInput.handleDeveloperInput('RUN_STOP');
+      this.gameInput.handleDeveloperInput('RUN_STOP', 'NETWORK');
       this.running = false;
       changed = true;
     }
     if (this.crouching) {
-      this.gameInput.handleDeveloperInput('CROUCH_END');
+      this.gameInput.handleDeveloperInput('CROUCH_END', 'NETWORK');
       this.crouching = false;
       changed = true;
     }
@@ -197,13 +265,30 @@ export class TVController {
     }
   }
 
+  private releaseMovement(reason: string, publish = true): void {
+    if (this.movement === 0) return;
+    this.gameInput.handleHorizontalMovement({ direction: 0, intensity: 0 }, 'NETWORK');
+    this.movement = 0;
+    this.running = false;
+    this.lastMovementAt = null;
+    if (publish) this.onGameInput?.();
+    this.log(`${reason}; released movement`);
+  }
+
+  private updateInputRate(now: number, recordInput = false): void {
+    const windowStart = now - 1_000;
+    this.inputArrivalTimes = this.inputArrivalTimes.filter((timestamp) => timestamp > windowStart);
+    if (recordInput) this.inputArrivalTimes.push(now);
+    this.inputRatePerSecond = this.inputArrivalTimes.length;
+  }
+
   private scheduleTimeoutCheck(): void {
     if (this.disposed) return;
     this.timeoutTimer = this.scheduler.setTimeout(() => {
       this.timeoutTimer = null;
       this.checkHeartbeatTimeout();
       this.scheduleTimeoutCheck();
-    }, Math.min(500, this.heartbeatTimeoutMs));
+    }, Math.min(100, this.heartbeatTimeoutMs));
   }
 
   private emit(): void {
